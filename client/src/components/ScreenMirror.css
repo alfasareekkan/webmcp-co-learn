@@ -65,3 +65,52 @@
 .mirror-empty span {
   font-size: 12px;
 }
+
+/* --- Draw Button --- */
+
+.mirror-draw-btn {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  background: var(--primary);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+
+.mirror-draw-btn:hover {
+  background: #7e70f0;
+}
+
+/* --- Saved Drawings Strip --- */
+
+.mirror-saved-strip {
+  display: flex;
+  gap: 8px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.saved-thumb {
+  width: 60px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: transform 0.15s, border-color 0.15s;
+}
+
+.saved-thumb:hover {
+  transform: scale(1.1);
+  border-color: var(--primary);
+}

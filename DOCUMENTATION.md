@@ -661,6 +661,48 @@ cd client && npm run dev
 - [ ] Proactive suggestions (detect confusion, repeated actions)
 - [ ] Cross-tab context awareness
 
+### Phase 2.5 (Current) — Drawing & On-Page Guidance
+
+- [x] **Drawing Canvas** — Freehand annotation on screenshots
+  - Pen, arrow, rectangle, circle, text, eraser tools
+  - Color picker (8 colors) and brush size selector
+  - Undo/redo with keyboard shortcuts (Ctrl+Z / Ctrl+Shift+Z)
+  - Save annotated images with thumbnail strip
+  - Full-screen overlay with responsive canvas scaling
+- [x] **On-Page Guidance Overlay** — Visual guides rendered directly on the website
+  - Pulsing highlight boxes around elements with colored borders
+  - Numbered step badges with labels
+  - Curved arrows connecting sequential steps
+  - Tooltips with explanations for each highlighted element
+  - Step-by-step mode (Prev/Next) or show-all mode
+  - Dismiss button to clear overlay
+  - Auto-triggered from AI responses with highlights
+  - Manual "Show on Page" / "Clear Overlay" buttons in chat
+
+#### Architecture — On-Page Guidance Flow:
+```
+AI response with highlights
+  ↓
+Server maps highlights → element bounds (guidance data)
+  ↓
+Server auto-sends SHOW_GUIDANCE to extension via WebSocket
+  ↓
+Background.js relays to active tab via chrome.tabs.sendMessage
+  ↓
+overlay.js (content script) renders highlights, badges, arrows, tooltips
+  ↓
+User can navigate step-by-step or dismiss
+```
+
+Dashboard can also manually trigger guidance:
+```
+ChatPanel "Show on Page" button
+  ↓
+WebSocket sends SHOW_GUIDANCE with guidance data
+  ↓
+Server relays to extension → overlay.js renders on page
+```
+
 ### Phase 3 (Future) — Action Automation
 
 - [ ] AI-driven browser actions (click, type, scroll via CDP)

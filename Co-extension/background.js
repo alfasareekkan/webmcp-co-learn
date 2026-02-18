@@ -73,6 +73,18 @@ async function handleBackendMessage(msg) {
       wsSend({ type: "CONTEXT_RESPONSE", requestId, ok: false, error: err.message });
     }
   }
+
+  // Relay guidance overlay commands to the active tab's content script
+  if (msg.type === "SHOW_GUIDANCE" || msg.type === "CLEAR_GUIDANCE" || msg.type === "STEP_GUIDANCE") {
+    const tabId = state.activeTabId;
+    if (tabId) {
+      try {
+        await chrome.tabs.sendMessage(tabId, msg);
+      } catch (err) {
+        console.warn("[CoLearn] Could not send guidance to tab:", err.message);
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -47,6 +47,7 @@ export default function App() {
             context: data.context,
             image: data.image || null,
             highlights: data.highlights || [],
+            guidance: data.guidance || [],
           },
         ]);
         break;
@@ -121,6 +122,7 @@ export default function App() {
           onSend={sendChat}
           connected={connected}
           aiThinking={aiThinking}
+          wsSend={send}
         />
       </main>
     </div>

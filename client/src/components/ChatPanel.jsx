@@ -75,7 +75,47 @@ function HighlightLegend({ highlights }) {
   );
 }
 
-export default function ChatPanel({ messages, onSend, connected, aiThinking }) {
+function GuidanceActions({ guidance, wsSend }) {
+  const [overlayActive, setOverlayActive] = useState(false);
+
+  if (!guidance?.length || !wsSend) return null;
+
+  const showOnPage = () => {
+    wsSend({ type: "SHOW_GUIDANCE", guides: guidance });
+    setOverlayActive(true);
+  };
+
+  const clearOverlay = () => {
+    wsSend({ type: "CLEAR_GUIDANCE" });
+    setOverlayActive(false);
+  };
+
+  return (
+    <div className="guidance-actions">
+      {overlayActive ? (
+        <>
+          <button className="guidance-btn active" onClick={clearOverlay}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M18 6L6 18M6 6l12 12"/>
+            </svg>
+            Clear Overlay
+          </button>
+          <span className="guidance-status">Showing on page</span>
+        </>
+      ) : (
+        <button className="guidance-btn" onClick={showOnPage}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+          Show on Page
+        </button>
+      )}
+    </div>
+  );
+}
+
+export default function ChatPanel({ messages, onSend, connected, aiThinking, wsSend }) {
   const [input, setInput] = useState("");
   const bottomRef = useRef(null);
 
@@ -109,7 +149,7 @@ export default function ChatPanel({ messages, onSend, connected, aiThinking }) {
             <span>
               Try: "Where is the create button?" or "Show me how to navigate to settings"
               <br />
-              AI will highlight elements directly on the screenshot.
+              AI will highlight elements on the screenshot and directly on the page.
             </span>
           </div>
         )}
@@ -118,13 +158,14 @@ export default function ChatPanel({ messages, onSend, connected, aiThinking }) {
           <div className={`chat-bubble ${senderClass(msg.sender)}`} key={i}>
             <div className="bubble-sender">{senderLabel(msg.sender)}</div>
 
-            {/* Annotated screenshot */}
             {msg.image && <AnnotatedImage src={msg.image} />}
 
-            {/* Highlight legend */}
             {msg.highlights?.length > 0 && <HighlightLegend highlights={msg.highlights} />}
 
-            {/* Text content */}
+            {msg.guidance?.length > 0 && (
+              <GuidanceActions guidance={msg.guidance} wsSend={wsSend} />
+            )}
+
             <div className="bubble-text">{renderText(msg.text)}</div>
 
             {msg.context?.url && (

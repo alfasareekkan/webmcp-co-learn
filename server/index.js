@@ -303,6 +303,19 @@ wss.on("connection", (ws, req) => {
         handleChatMessage(msg.text, ws);
         break;
       }
+
+      case "SHOW_GUIDANCE": {
+        sendToExtension({
+          type: "SHOW_GUIDANCE",
+          guides: msg.guides || [],
+        });
+        break;
+      }
+
+      case "CLEAR_GUIDANCE": {
+        sendToExtension({ type: "CLEAR_GUIDANCE" });
+        break;
+      }
     }
   });
 
@@ -355,7 +368,20 @@ async function handleChatMessage(text, senderWs) {
       annotatedImage = await buildAnnotatedImage(context, aiResult.highlights);
     }
 
-    // 5. Send AI response with optional annotated image
+    // 5. Build guidance data for on-page overlay
+    const guidanceData = aiResult.highlights.map((h, i) => {
+      const el = context.elements?.[h.elementIndex];
+      if (!el?.bounds) return null;
+      return {
+        bounds: el.bounds,
+        label: h.label || `${i + 1}`,
+        reason: h.reason || "",
+        color: HIGHLIGHT_COLORS[i % HIGHLIGHT_COLORS.length],
+        selector: el.id ? `#${el.id}` : null,
+      };
+    }).filter(Boolean);
+
+    // 6. Send AI response with optional annotated image and guidance
     const aiMsg = {
       type: "CHAT_MESSAGE",
       text: aiResult.text,
@@ -363,10 +389,19 @@ async function handleChatMessage(text, senderWs) {
       timestamp: Date.now(),
       image: annotatedImage,
       highlights: aiResult.highlights,
+      guidance: guidanceData,
       context: { url: context.url, title: context.title },
     };
     pushEvent(aiMsg);
     broadcast("dashboard", aiMsg);
+
+    // 7. Auto-send guidance overlay to extension
+    if (guidanceData.length > 0) {
+      sendToExtension({
+        type: "SHOW_GUIDANCE",
+        guides: guidanceData,
+      });
+    }
 
   } catch (err) {
     broadcast("dashboard", {
