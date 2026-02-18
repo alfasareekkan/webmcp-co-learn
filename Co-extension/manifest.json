@@ -1,0 +1,39 @@
+{
+  "name": "CoLearn Agent",
+  "version": "1.0",
+  "manifest_version": 3,
+  "description": "Browser agent that observes and interacts with web apps to enable AI-guided co-working and co-learning.",
+
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "debugger",
+    "tabs"
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ],
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

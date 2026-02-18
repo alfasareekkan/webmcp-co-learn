@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CoLearn Agent</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2a2d3a;
+      --primary: #6c5ce7;
+      --primary-hover: #7e70f0;
+      --success: #00cec9;
+      --danger: #ff7675;
+      --text: #e4e6ef;
+      --text-dim: #8a8ea0;
+      --radius: 8px;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      width: 380px;
+      min-height: 460px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    header .logo {
+      width: 28px;
+      height: 28px;
+      background: var(--primary);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 14px;
+      color: #fff;
+      flex-shrink: 0;
+    }
+
+    header h1 {
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    header .version {
+      margin-left: auto;
+      font-size: 11px;
+      color: var(--text-dim);
+      background: var(--surface);
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+
+    .section {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .section-title {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: var(--text-dim);
+      margin-bottom: 10px;
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+
+    .status-row:last-child { margin-bottom: 0; }
+
+    .status-label { color: var(--text-dim); }
+
+    .status-value {
+      font-weight: 500;
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      text-align: right;
+    }
+
+    .dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+
+    .dot.on  { background: var(--success); }
+    .dot.off { background: var(--danger); }
+
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    button {
+      padding: 9px 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+
+    button:hover {
+      background: var(--border);
+      border-color: var(--primary);
+    }
+
+    button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    button.primary {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #fff;
+    }
+
+    button.primary:hover { background: var(--primary-hover); }
+
+    button.full { grid-column: 1 / -1; }
+
+    .event-log {
+      max-height: 180px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .event-log::-webkit-scrollbar { width: 4px; }
+    .event-log::-webkit-scrollbar-track { background: transparent; }
+    .event-log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .event-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: var(--surface);
+      font-size: 12px;
+    }
+
+    .event-type {
+      flex-shrink: 0;
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .event-type.click { background: #6c5ce733; color: #a29bfe; }
+    .event-type.input { background: #00cec933; color: #00cec9; }
+    .event-type.nav   { background: #fdcb6e33; color: #fdcb6e; }
+
+    .event-detail {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text-dim);
+    }
+
+    .empty-state {
+      text-align: center;
+      color: var(--text-dim);
+      padding: 24px 0;
+      font-size: 12px;
+    }
+
+    #screenshot-preview {
+      display: none;
+      margin-top: 10px;
+    }
+
+    #screenshot-preview img {
+      width: 100%;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">CL</div>
+    <h1>CoLearn Agent</h1>
+    <span class="version">Phase 1</span>
+  </header>
+
+  <!-- Status -->
+  <div class="section">
+    <div class="section-title">Status</div>
+    <div class="status-row">
+      <span class="status-label">Active Tab</span>
+      <span class="status-value" id="active-tab">—</span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Debugger</span>
+      <span class="status-value" id="debugger-status">
+        <span class="dot off"></span>Detached
+      </span>
+    </div>
+    <div class="status-row">
+      <span class="status-label">Detected App</span>
+      <span class="status-value" id="detected-app">—</span>
+    </div>
+  </div>
+
+  <!-- Actions -->
+  <div class="section">
+    <div class="section-title">Actions</div>
+    <div class="actions">
+      <button id="btn-attach" class="primary">Attach Debugger</button>
+      <button id="btn-detach">Detach</button>
+      <button id="btn-context">Read Context</button>
+      <button id="btn-screenshot">Screenshot</button>
+    </div>
+    <div id="screenshot-preview">
+      <img id="screenshot-img" src="" alt="screenshot" />
+    </div>
+  </div>
+
+  <!-- Event Log -->
+  <div class="section" style="border-bottom: none;">
+    <div class="section-title">Recent Events</div>
+    <div class="event-log" id="event-log">
+      <div class="empty-state">No events captured yet.</div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
