@@ -1,6 +1,6 @@
 // CoLearn Agent — Background Service Worker
-// Observes pages via CDP, gathers rich context on demand,
-// and streams everything to the backend for AI processing.
+// Observes pages via CDP, gathers rich context with element positions on demand,
+// and streams everything to the backend for AI visual guidance.
 
 "use strict";
 
@@ -15,9 +15,8 @@ const state = {
   activeTabId: null,
   debuggerAttached: new Set(),
   pageContexts: {},
-  // CDP observation buffers (per tab)
-  consoleLogs: {},    // tabId -> [{level, text, timestamp}]
-  networkLogs: {},    // tabId -> [{url, method, status, type, timestamp}]
+  consoleLogs: {},
+  networkLogs: {},
 };
 
 const MAX_EVENTS = 200;
@@ -56,7 +55,7 @@ function wsSend(data) {
 connectWS();
 
 // ---------------------------------------------------------------------------
-// Handle messages FROM backend (context requests)
+// Handle messages FROM backend
 // ---------------------------------------------------------------------------
 async function handleBackendMessage(msg) {
   if (msg.type === "GATHER_CONTEXT") {
@@ -77,7 +76,7 @@ async function handleBackendMessage(msg) {
 }
 
 // ---------------------------------------------------------------------------
-// Gather full page context via CDP
+// Gather full page context via CDP — now includes element bounding boxes
 // ---------------------------------------------------------------------------
 async function gatherFullContext(tabId) {
   const attached = await ensureAttached(tabId);
@@ -85,19 +84,23 @@ async function gatherFullContext(tabId) {
 
   const tab = await chrome.tabs.get(tabId);
 
-  // Run all CDP queries in parallel
-  const [screenshot, domInfo, performanceMetrics] = await Promise.all([
-    captureScreenshotRaw(tabId),
-    extractDomInfo(tabId),
-    getPerformanceMetrics(tabId),
-  ]);
+  const [screenshot, domInfo, elementsWithBounds, performanceMetrics, viewportSize] =
+    await Promise.all([
+      captureScreenshotRaw(tabId),
+      extractDomInfo(tabId),
+      extractInteractiveElements(tabId),
+      getPerformanceMetrics(tabId),
+      getViewportSize(tabId),
+    ]);
 
   return {
     tabId,
     url: tab.url,
     title: tab.title,
-    screenshot: screenshot ? `data:image/png;base64,${screenshot}` : null,
+    screenshot: screenshot ? `data:image/jpeg;base64,${screenshot}` : null,
+    viewport: viewportSize,
     dom: domInfo,
+    elements: elementsWithBounds,
     consoleLogs: (state.consoleLogs[tabId] || []).slice(-30),
     networkLogs: (state.networkLogs[tabId] || []).slice(-30),
     performance: performanceMetrics,
@@ -111,7 +114,76 @@ async function ensureAttached(tabId) {
 }
 
 // ---------------------------------------------------------------------------
-// CDP — DOM / page info via Runtime.evaluate
+// CDP — Extract interactive elements WITH bounding boxes
+// ---------------------------------------------------------------------------
+async function extractInteractiveElements(tabId) {
+  const expr = `(function() {
+    const selectors = [
+      'button', '[role="button"]', 'a[href]', 'input', 'textarea', 'select',
+      '[onclick]', '[role="link"]', '[role="tab"]', '[role="menuitem"]',
+      'img', 'svg', 'icon', '[class*="icon"]', '[class*="btn"]',
+      '[class*="logo"]', '[class*="nav"]', 'h1', 'h2', 'h3',
+      '[data-testid]', '[aria-label]'
+    ];
+    const seen = new Set();
+    const results = [];
+    for (const sel of selectors) {
+      try {
+        const els = document.querySelectorAll(sel);
+        for (const el of els) {
+          if (seen.has(el) || results.length >= 60) continue;
+          seen.add(el);
+          const rect = el.getBoundingClientRect();
+          if (rect.width === 0 || rect.height === 0) continue;
+          if (rect.top > window.innerHeight + 100) continue;
+          results.push({
+            tag: el.tagName,
+            text: (el.innerText || el.value || el.alt || el.ariaLabel || el.title || '').slice(0, 100).trim(),
+            classes: (el.className?.toString() || '').slice(0, 120),
+            id: el.id || null,
+            href: el.href || null,
+            type: el.type || null,
+            role: el.getAttribute('role') || null,
+            bounds: {
+              x: Math.round(rect.x),
+              y: Math.round(rect.y),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+            },
+          });
+        }
+      } catch {}
+    }
+    return JSON.stringify(results);
+  })()`;
+
+  try {
+    const result = await chrome.debugger.sendCommand(
+      { tabId }, "Runtime.evaluate", { expression: expr }
+    );
+    return JSON.parse(result.result.value);
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CDP — Viewport size
+// ---------------------------------------------------------------------------
+async function getViewportSize(tabId) {
+  const expr = `JSON.stringify({ width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio })`;
+  try {
+    const result = await chrome.debugger.sendCommand(
+      { tabId }, "Runtime.evaluate", { expression: expr }
+    );
+    return JSON.parse(result.result.value);
+  } catch {
+    return { width: 1280, height: 800, dpr: 1 };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CDP — DOM / page info
 // ---------------------------------------------------------------------------
 async function extractDomInfo(tabId) {
   const expr = `JSON.stringify({
@@ -167,7 +239,7 @@ async function getPerformanceMetrics(tabId) {
 async function captureScreenshotRaw(tabId) {
   try {
     const result = await chrome.debugger.sendCommand(
-      { tabId }, "Page.captureScreenshot", { format: "jpeg", quality: 60 }
+      { tabId }, "Page.captureScreenshot", { format: "jpeg", quality: 70 }
     );
     return result.data;
   } catch {
@@ -188,8 +260,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       : { level: params.type, text: params.args?.map(a => a.value ?? a.description ?? "").join(" ").slice(0, 300) };
     entry.timestamp = Date.now();
     state.consoleLogs[tabId].push(entry);
-    if (state.consoleLogs[tabId].length > MAX_LOGS)
-      state.consoleLogs[tabId].shift();
+    if (state.consoleLogs[tabId].length > MAX_LOGS) state.consoleLogs[tabId].shift();
   }
 
   if (method === "Network.requestWillBeSent") {
@@ -201,8 +272,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
       type: params.type,
       timestamp: Date.now(),
     });
-    if (state.networkLogs[tabId].length > MAX_LOGS)
-      state.networkLogs[tabId].shift();
+    if (state.networkLogs[tabId].length > MAX_LOGS) state.networkLogs[tabId].shift();
   }
 
   if (method === "Network.responseReceived") {
@@ -305,7 +375,6 @@ async function attachDebugger(tabId) {
 
   try {
     await chrome.debugger.attach({ tabId }, "1.3");
-    // Enable all observation domains
     await Promise.all([
       chrome.debugger.sendCommand({ tabId }, "Page.enable"),
       chrome.debugger.sendCommand({ tabId }, "Runtime.enable"),

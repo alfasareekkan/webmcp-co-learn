@@ -4,6 +4,7 @@ import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import cors from "cors";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { annotateScreenshot } from "./annotate.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -18,9 +19,9 @@ if (GEMINI_API_KEY) {
     model: "gemini-2.5-flash-lite",
     generationConfig: { temperature: 0 },
   });
-  console.log("[AI] Gemini model loaded");
+  console.log("[AI] Gemini model loaded (gemini-2.5-flash-lite)");
 } else {
-  console.warn("[AI] No GEMINI_API_KEY set — AI features disabled. Set it via: GEMINI_API_KEY=your_key npm start");
+  console.warn("[AI] No GEMINI_API_KEY — AI disabled. Set via: GEMINI_API_KEY=key npm start");
 }
 
 const app = express();
@@ -33,16 +34,12 @@ const wss = new WebSocketServer({ server });
 // ---------------------------------------------------------------------------
 // Client tracking
 // ---------------------------------------------------------------------------
-const clients = {
-  extension: new Set(),
-  dashboard: new Set(),
-};
+const clients = { extension: new Set(), dashboard: new Set() };
 
 const recentEvents = [];
 const MAX_EVENTS = 500;
 let latestScreenshot = null;
 
-// Pending context requests (requestId -> { resolve, reject, timer })
 const pendingContextRequests = new Map();
 const CONTEXT_TIMEOUT = 15000;
 
@@ -75,7 +72,7 @@ function requestContextFromExtension() {
 
     const sent = sendToExtension({ type: "GATHER_CONTEXT", requestId });
     if (!sent) {
-      reject(new Error("No extension connected. Open a tab with the extension active and attach the debugger."));
+      reject(new Error("No extension connected. Attach the debugger from the extension popup."));
       return;
     }
 
@@ -89,84 +86,103 @@ function requestContextFromExtension() {
 }
 
 // ---------------------------------------------------------------------------
-// Gemini AI
+// Gemini AI — two-mode prompting
 // ---------------------------------------------------------------------------
-const SYSTEM_PROMPT = `You are CoLearn Assistant — an AI co-pilot that helps users understand and navigate web applications.
 
-You receive rich context about the user's current browser tab including:
-- A screenshot of the page
-- DOM structure (headings, buttons, links, inputs, forms, visible text)
-- Recent network requests
-- Console logs
+const SYSTEM_PROMPT = `You are CoLearn Assistant — an AI co-pilot that helps users understand and navigate web applications in real time.
+
+You receive:
+- A screenshot of the user's current browser tab
+- DOM structure (headings, buttons, links, inputs, forms, text)
+- Interactive elements with their pixel-level bounding boxes
+- Recent network requests and console logs
 - Performance metrics
 
-Based on this context, answer the user's question helpfully and concisely. When describing UI elements, reference them by their visible text or position. If you see errors in console or network failures, mention them when relevant.
+RESPONSE FORMAT — You MUST reply with valid JSON (no markdown fences). Use this exact structure:
 
-Keep responses short and actionable — this is a real-time co-working assistant.`;
+{
+  "text": "Your helpful answer in plain text. Use **bold** for emphasis.",
+  "highlights": [
+    {
+      "elementIndex": 0,
+      "label": "Short label",
+      "reason": "Why this element is relevant"
+    }
+  ]
+}
 
-async function askGemini(userMessage, context) {
-  if (!geminiModel) {
-    return "AI is not configured. Set the GEMINI_API_KEY environment variable and restart the server.";
-  }
+RULES:
+- "text" is always required — your main answer.
+- "highlights" is an array of elements to visually highlight on the screenshot. Include it when the user asks WHERE something is, HOW to do something, or when pointing out specific UI elements helps.
+- "elementIndex" refers to the index in the ELEMENTS array provided in the context.
+- If no visual highlighting is needed (general questions, explanations), set "highlights" to an empty array [].
+- Keep text concise and actionable.
+- When highlighting, describe the element location in text too (e.g., "top-right corner", "in the sidebar").
+- Use numbered labels (1, 2, 3) when highlighting multiple elements to show a sequence/pathway.`;
 
-  // Build a text summary of the context
-  const contextParts = [];
-  if (context.url) contextParts.push(`**Page URL:** ${context.url}`);
-  if (context.title) contextParts.push(`**Page Title:** ${context.title}`);
+function buildContextText(context) {
+  const parts = [];
+  if (context.url) parts.push(`Page URL: ${context.url}`);
+  if (context.title) parts.push(`Page Title: ${context.title}`);
 
   if (context.dom) {
     const d = context.dom;
     if (d.headings?.length)
-      contextParts.push(`**Headings:** ${d.headings.map(h => `${h.level}: ${h.text}`).join(" | ")}`);
+      parts.push(`Headings: ${d.headings.map(h => `${h.level}: ${h.text}`).join(" | ")}`);
     if (d.buttons?.length)
-      contextParts.push(`**Buttons:** ${d.buttons.map(b => b.text).filter(Boolean).join(", ")}`);
+      parts.push(`Buttons: ${d.buttons.map(b => b.text).filter(Boolean).join(", ")}`);
     if (d.links?.length)
-      contextParts.push(`**Links (sample):** ${d.links.slice(0, 10).map(l => l.text || l.href).join(", ")}`);
+      parts.push(`Links: ${d.links.slice(0, 10).map(l => l.text || l.href).join(", ")}`);
     if (d.inputs?.length)
-      contextParts.push(`**Inputs:** ${d.inputs.map(i => `${i.type}[${i.name || i.placeholder || ""}]`).join(", ")}`);
-    if (d.forms?.length)
-      contextParts.push(`**Forms:** ${d.forms.map(f => `${f.method} ${f.action}`).join(", ")}`);
+      parts.push(`Inputs: ${d.inputs.map(i => `${i.type}[${i.name || i.placeholder || ""}]`).join(", ")}`);
     if (d.selection)
-      contextParts.push(`**Selected text:** ${d.selection}`);
+      parts.push(`Selected text: ${d.selection}`);
     if (d.bodyText)
-      contextParts.push(`**Visible text (truncated):** ${d.bodyText.slice(0, 1500)}`);
+      parts.push(`Visible text: ${d.bodyText.slice(0, 1500)}`);
+  }
+
+  if (context.elements?.length) {
+    const elSummary = context.elements.map((el, i) =>
+      `[${i}] <${el.tag}> "${el.text}" bounds:{x:${el.bounds.x},y:${el.bounds.y},w:${el.bounds.width},h:${el.bounds.height}}${el.role ? ` role="${el.role}"` : ""}${el.id ? ` id="${el.id}"` : ""}`
+    ).join("\n");
+    parts.push(`ELEMENTS (with bounding boxes):\n${elSummary}`);
   }
 
   if (context.networkLogs?.length) {
-    const netSummary = context.networkLogs.slice(-15).map(n =>
-      `${n.method || "?"} ${n.status || "..."} ${n.url?.slice(0, 100)}`
+    const net = context.networkLogs.slice(-10).map(n =>
+      `${n.method || "?"} ${n.status || "..."} ${n.url?.slice(0, 80)}`
     ).join("\n");
-    contextParts.push(`**Recent Network Requests:**\n${netSummary}`);
+    parts.push(`Network:\n${net}`);
   }
 
   if (context.consoleLogs?.length) {
-    const consoleSummary = context.consoleLogs.slice(-10).map(c =>
-      `[${c.level}] ${c.text}`
-    ).join("\n");
-    contextParts.push(`**Console Logs:**\n${consoleSummary}`);
+    const con = context.consoleLogs.slice(-8).map(c => `[${c.level}] ${c.text}`).join("\n");
+    parts.push(`Console:\n${con}`);
   }
 
   if (context.performance) {
-    const perfLines = Object.entries(context.performance)
+    const perf = Object.entries(context.performance)
       .map(([k, v]) => `${k}: ${typeof v === "number" ? Math.round(v) : v}`)
       .join(", ");
-    contextParts.push(`**Performance:** ${perfLines}`);
+    parts.push(`Performance: ${perf}`);
   }
 
-  const contextText = contextParts.join("\n\n");
+  return parts.join("\n\n");
+}
+
+async function askGemini(userMessage, context) {
+  if (!geminiModel) {
+    return { text: "AI is not configured. Set GEMINI_API_KEY and restart.", highlights: [] };
+  }
+
+  const contextText = buildContextText(context);
 
   try {
-    // Build request parts — include screenshot as image if present
     const parts = [];
 
     if (context.screenshot) {
       const base64Data = context.screenshot.replace(/^data:image\/\w+;base64,/, "");
-      parts.push({
-        inlineData: {
-          mimeType: "image/jpeg",
-          data: base64Data,
-        },
-      });
+      parts.push({ inlineData: { mimeType: "image/jpeg", data: base64Data } });
     }
 
     parts.push({
@@ -174,11 +190,58 @@ async function askGemini(userMessage, context) {
     });
 
     const result = await geminiModel.generateContent(parts);
-    const response = result.response;
-    return response.text();
+    const raw = result.response.text();
+
+    // Parse JSON response from Gemini
+    try {
+      const cleaned = raw.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
+      const parsed = JSON.parse(cleaned);
+      return {
+        text: parsed.text || raw,
+        highlights: Array.isArray(parsed.highlights) ? parsed.highlights : [],
+      };
+    } catch {
+      // Gemini didn't return JSON — treat as plain text
+      return { text: raw, highlights: [] };
+    }
   } catch (err) {
     console.error("[AI] Gemini error:", err.message);
-    return `AI error: ${err.message}`;
+    return { text: `AI error: ${err.message}`, highlights: [] };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Build annotated screenshot from AI highlights
+// ---------------------------------------------------------------------------
+const HIGHLIGHT_COLORS = ["#FF3B6F", "#00BCD4", "#FF9800", "#4CAF50", "#9C27B0", "#2196F3"];
+
+async function buildAnnotatedImage(context, highlights) {
+  if (!highlights?.length || !context.screenshot || !context.elements?.length) return null;
+
+  const screenshotBase64 = context.screenshot.replace(/^data:image\/\w+;base64,/, "");
+
+  const boxes = highlights.map((h, i) => {
+    const elIdx = h.elementIndex;
+    const el = context.elements[elIdx];
+    if (!el?.bounds) return null;
+
+    return {
+      x: el.bounds.x,
+      y: el.bounds.y,
+      width: el.bounds.width,
+      height: el.bounds.height,
+      label: h.label || `${i + 1}`,
+      color: HIGHLIGHT_COLORS[i % HIGHLIGHT_COLORS.length],
+    };
+  }).filter(Boolean);
+
+  if (!boxes.length) return null;
+
+  try {
+    return await annotateScreenshot(screenshotBase64, boxes, context.viewport);
+  } catch (err) {
+    console.error("[Annotate] Error:", err.message);
+    return null;
   }
 }
 
@@ -206,7 +269,6 @@ wss.on("connection", (ws, req) => {
     try { msg = JSON.parse(raw); } catch { return; }
 
     switch (msg.type) {
-      // --- Events from extension ---
       case "USER_CLICK":
       case "USER_INPUT":
       case "NAVIGATION":
@@ -219,16 +281,13 @@ wss.on("connection", (ws, req) => {
 
       case "SCREENSHOT": {
         latestScreenshot = {
-          dataUrl: msg.dataUrl,
-          tabId: msg.tabId,
-          url: msg.url,
-          timestamp: Date.now(),
+          dataUrl: msg.dataUrl, tabId: msg.tabId,
+          url: msg.url, timestamp: Date.now(),
         };
         broadcast("dashboard", { type: "SCREENSHOT", ...latestScreenshot });
         break;
       }
 
-      // --- Context response from extension ---
       case "CONTEXT_RESPONSE": {
         const pending = pendingContextRequests.get(msg.requestId);
         if (pending) {
@@ -240,7 +299,6 @@ wss.on("connection", (ws, req) => {
         break;
       }
 
-      // --- Chat from dashboard ---
       case "CHAT_MESSAGE": {
         handleChatMessage(msg.text, ws);
         break;
@@ -255,10 +313,9 @@ wss.on("connection", (ws, req) => {
 });
 
 // ---------------------------------------------------------------------------
-// Chat message handler — the brain
+// Chat handler — the brain
 // ---------------------------------------------------------------------------
 async function handleChatMessage(text, senderWs) {
-  // 1) Echo user message to all dashboards
   const userMsg = {
     type: "CHAT_MESSAGE",
     text,
@@ -268,24 +325,18 @@ async function handleChatMessage(text, senderWs) {
   pushEvent(userMsg);
   broadcast("dashboard", userMsg);
 
-  // 2) Tell dashboards AI is thinking
   broadcast("dashboard", { type: "AI_THINKING", thinking: true });
 
   try {
-    // 3) Gather context from extension
+    // 1. Gather context from extension
     let context;
     try {
       context = await requestContextFromExtension();
     } catch (err) {
-      // Fall back to minimal context
-      context = {
-        url: "unknown",
-        title: "unknown",
-        error: err.message,
-      };
+      context = { url: "unknown", title: "unknown", error: err.message };
     }
 
-    // 4) Update screenshot in dashboard if we got a new one
+    // 2. Update screen mirror
     if (context.screenshot) {
       latestScreenshot = {
         dataUrl: context.screenshot,
@@ -295,31 +346,35 @@ async function handleChatMessage(text, senderWs) {
       broadcast("dashboard", { type: "SCREENSHOT", ...latestScreenshot });
     }
 
-    // 5) Ask Gemini
-    const aiAnswer = await askGemini(text, context);
+    // 3. Ask Gemini (returns structured { text, highlights })
+    const aiResult = await askGemini(text, context);
 
-    // 6) Send AI response
+    // 4. If AI highlighted elements, draw on the screenshot
+    let annotatedImage = null;
+    if (aiResult.highlights.length > 0) {
+      annotatedImage = await buildAnnotatedImage(context, aiResult.highlights);
+    }
+
+    // 5. Send AI response with optional annotated image
     const aiMsg = {
       type: "CHAT_MESSAGE",
-      text: aiAnswer,
+      text: aiResult.text,
       sender: "ai",
       timestamp: Date.now(),
-      context: {
-        url: context.url,
-        title: context.title,
-      },
+      image: annotatedImage,
+      highlights: aiResult.highlights,
+      context: { url: context.url, title: context.title },
     };
     pushEvent(aiMsg);
     broadcast("dashboard", aiMsg);
 
   } catch (err) {
-    const errorMsg = {
+    broadcast("dashboard", {
       type: "CHAT_MESSAGE",
       text: `Error: ${err.message}`,
       sender: "system",
       timestamp: Date.now(),
-    };
-    broadcast("dashboard", errorMsg);
+    });
   } finally {
     broadcast("dashboard", { type: "AI_THINKING", thinking: false });
   }
@@ -348,6 +403,6 @@ app.get("/api/events", (_req, res) => {
 // Start
 // ---------------------------------------------------------------------------
 server.listen(PORT, () => {
-  console.log(`[CoLearn] Server running on http://localhost:${PORT}`);
+  console.log(`[CoLearn] Server on http://localhost:${PORT}`);
   console.log(`[CoLearn] WebSocket on ws://localhost:${PORT}`);
 });

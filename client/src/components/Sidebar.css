@@ -4,7 +4,49 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  transition: opacity 0.25s ease;
 }
+
+.sidebar.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* --- Toggle button --- */
+
+.sidebar-toggle {
+  position: fixed;
+  top: 12px;
+  left: 6px;
+  z-index: 100;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: 10px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: left 0.25s ease, background 0.15s;
+}
+
+.sidebar-toggle:hover {
+  background: var(--primary);
+  color: #fff;
+}
+
+.sidebar-toggle.collapsed {
+  left: 8px;
+}
+
+.sidebar-toggle:not(.collapsed) {
+  left: 290px;
+}
+
+/* --- Header --- */
 
 .sidebar-header {
   display: flex;
@@ -54,6 +96,7 @@
 .ai-badge {
   background: var(--primary-dim) !important;
   color: var(--primary) !important;
+  margin-left: 0;
 }
 
 .sidebar-section-title {

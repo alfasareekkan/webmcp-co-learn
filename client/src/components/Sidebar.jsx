@@ -28,7 +28,7 @@ function getAppFromUrl(url) {
   }
 }
 
-export default function Sidebar({ events, connected, aiEnabled }) {
+export default function Sidebar({ events, connected, aiEnabled, collapsed, onToggle }) {
   const bottomRef = useRef(null);
 
   useEffect(() => {
@@ -36,48 +36,59 @@ export default function Sidebar({ events, connected, aiEnabled }) {
   }, [events.length]);
 
   return (
-    <aside className="sidebar">
-      <div className="sidebar-header">
-        <div className="logo">CL</div>
-        <h1>CoLearn</h1>
-        <span className={`conn-badge ${connected ? "on" : "off"}`}>
-          {connected ? "Live" : "Offline"}
-        </span>
-        {aiEnabled && <span className="conn-badge ai-badge">AI</span>}
-      </div>
+    <>
+      {/* Toggle button — always visible */}
+      <button
+        className={`sidebar-toggle ${collapsed ? "collapsed" : ""}`}
+        onClick={onToggle}
+        title={collapsed ? "Show sidebar" : "Hide sidebar"}
+      >
+        {collapsed ? "\u25B6" : "\u25C0"}
+      </button>
 
-      <div className="sidebar-section-title">Activity Feed</div>
+      <aside className={`sidebar ${collapsed ? "hidden" : ""}`}>
+        <div className="sidebar-header">
+          <div className="logo">CL</div>
+          <h1>CoLearn</h1>
+          <span className={`conn-badge ${connected ? "on" : "off"}`}>
+            {connected ? "Live" : "Offline"}
+          </span>
+          {aiEnabled && <span className="conn-badge ai-badge">AI</span>}
+        </div>
 
-      <div className="event-list">
-        {events.length === 0 && (
-          <div className="empty">
-            Waiting for events...
-            <br />
-            <span>Browse other tabs with the extension active</span>
-          </div>
-        )}
+        <div className="sidebar-section-title">Activity Feed</div>
 
-        {events.map((ev, i) => {
-          const meta = TYPE_META[ev.type] || { label: ev.type, cls: "default" };
-          const app = ev.app || getAppFromUrl(ev.url);
-
-          return (
-            <div className="event-row" key={i}>
-              <span className={`event-badge ${meta.cls}`}>{meta.label}</span>
-              <div className="event-body">
-                <span className="event-text">
-                  {ev.text || ev.tag || ev.url?.slice(0, 60) || "—"}
-                </span>
-                <span className="event-meta">
-                  {app && <span className="event-app">{app}</span>}
-                  <span className="event-time">{formatTime(ev.timestamp || ev.receivedAt)}</span>
-                </span>
-              </div>
+        <div className="event-list">
+          {events.length === 0 && (
+            <div className="empty">
+              Waiting for events...
+              <br />
+              <span>Browse other tabs with the extension active</span>
             </div>
-          );
-        })}
-        <div ref={bottomRef} />
-      </div>
-    </aside>
+          )}
+
+          {events.map((ev, i) => {
+            const meta = TYPE_META[ev.type] || { label: ev.type, cls: "default" };
+            const app = ev.app || getAppFromUrl(ev.url);
+
+            return (
+              <div className="event-row" key={i}>
+                <span className={`event-badge ${meta.cls}`}>{meta.label}</span>
+                <div className="event-body">
+                  <span className="event-text">
+                    {ev.text || ev.tag || ev.url?.slice(0, 60) || "—"}
+                  </span>
+                  <span className="event-meta">
+                    {app && <span className="event-app">{app}</span>}
+                    <span className="event-time">{formatTime(ev.timestamp || ev.receivedAt)}</span>
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+          <div ref={bottomRef} />
+        </div>
+      </aside>
+    </>
   );
 }

@@ -74,8 +74,10 @@
   line-height: 1.7;
 }
 
+/* --- Bubbles --- */
+
 .chat-bubble {
-  max-width: 80%;
+  max-width: 85%;
   padding: 10px 14px;
   border-radius: 14px;
   font-size: 13px;
@@ -101,6 +103,7 @@
   color: var(--text);
   border-bottom-left-radius: 4px;
   border-left: 3px solid var(--accent);
+  max-width: 90%;
 }
 
 .chat-bubble.system {
@@ -164,7 +167,77 @@
   opacity: 0.5;
 }
 
-/* Thinking animation */
+/* --- Annotated Image --- */
+
+.annotated-image-wrap {
+  margin: 8px 0;
+  position: relative;
+}
+
+.annotated-image {
+  width: 100%;
+  max-height: 280px;
+  object-fit: contain;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: max-height 0.3s ease;
+}
+
+.annotated-image.expanded {
+  max-height: none;
+}
+
+.image-hint {
+  text-align: center;
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+
+/* --- Highlight Legend --- */
+
+.highlight-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  background: var(--bg);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.legend-label {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.legend-reason {
+  color: var(--text-dim);
+}
+
+/* --- Thinking --- */
+
+.thinking-status {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
 .thinking-dots {
   display: flex;
   gap: 4px;
@@ -186,6 +259,8 @@
   0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
   40% { transform: translateY(-8px); opacity: 1; }
 }
+
+/* --- Input --- */
 
 .chat-input-bar {
   display: flex;
