@@ -3,25 +3,29 @@ import express from "express";
 import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import cors from "cors";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { annotateScreenshot } from "./annotate.js";
+import { createBrowserAgent, runBrowserAgent, classifyIntent } from "./agent.js";
+import { createChatModel, getAvailableProviders, getDefaultModel, getGuidanceModel } from "./models.js";
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const PORT = process.env.PORT || 3001;
 
-let geminiModel = null;
-if (GEMINI_API_KEY) {
-  const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-  geminiModel = genAI.getGenerativeModel({
-    model: "gemini-2.5-flash-lite",
-    generationConfig: { temperature: 0 },
-  });
-  console.log("[AI] Gemini model loaded (gemini-2.5-flash-lite)");
+// Active model selection (can be changed at runtime via dashboard)
+let activeAgentModel = getDefaultModel();
+let activeGuidanceModel = getGuidanceModel();
+
+const availableProviders = getAvailableProviders();
+const aiEnabled = availableProviders.length > 0;
+
+if (aiEnabled) {
+  console.log(`[AI] Providers available: ${availableProviders.map(p => p.name).join(", ")}`);
+  console.log(`[AI] Agent model: ${activeAgentModel?.provider}/${activeAgentModel?.model}`);
+  console.log(`[AI] Guidance model: ${activeGuidanceModel?.provider}/${activeGuidanceModel?.model}`);
 } else {
-  console.warn("[AI] No GEMINI_API_KEY — AI disabled. Set via: GEMINI_API_KEY=key npm start");
+  console.warn("[AI] No API keys configured. Set GEMINI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY in .env");
 }
 
 const app = express();
@@ -41,7 +45,12 @@ const MAX_EVENTS = 500;
 let latestScreenshot = null;
 
 const pendingContextRequests = new Map();
+const pendingActionRequests = new Map();
 const CONTEXT_TIMEOUT = 15000;
+const ACTION_TIMEOUT = 10000;
+
+// Abort controller for the currently running chat operation (agent or guidance)
+let activeChatAbort = null;
 
 function pushEvent(event) {
   recentEvents.push(event);
@@ -69,27 +78,66 @@ function sendToExtension(data) {
 function requestContextFromExtension() {
   return new Promise((resolve, reject) => {
     const requestId = `ctx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-
     const sent = sendToExtension({ type: "GATHER_CONTEXT", requestId });
     if (!sent) {
       reject(new Error("No extension connected. Attach the debugger from the extension popup."));
       return;
     }
-
     const timer = setTimeout(() => {
       pendingContextRequests.delete(requestId);
       reject(new Error("Context gathering timed out — is the debugger attached?"));
     }, CONTEXT_TIMEOUT);
-
     pendingContextRequests.set(requestId, { resolve, reject, timer });
   });
 }
 
 // ---------------------------------------------------------------------------
-// Gemini AI — two-mode prompting
+// Request action execution from extension
 // ---------------------------------------------------------------------------
+function requestActionExecution(action) {
+  return new Promise((resolve, reject) => {
+    const requestId = `act_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const sent = sendToExtension({ type: "EXECUTE_ACTION", requestId, action });
+    if (!sent) {
+      reject(new Error("No extension connected. Attach the debugger from the extension popup."));
+      return;
+    }
+    const timer = setTimeout(() => {
+      pendingActionRequests.delete(requestId);
+      reject(new Error("Action execution timed out"));
+    }, ACTION_TIMEOUT);
+    pendingActionRequests.set(requestId, { resolve, reject, timer });
+  });
+}
 
-const SYSTEM_PROMPT = `You are CoLearn Assistant — an AI co-pilot that helps users understand and navigate web applications in real time.
+// ---------------------------------------------------------------------------
+// LangGraph Browser Agent (created on-demand with active model)
+// ---------------------------------------------------------------------------
+function buildBrowserAgent(modelConfig) {
+  if (!modelConfig) return null;
+  try {
+    const model = createChatModel(modelConfig.provider, modelConfig.model);
+    return createBrowserAgent({
+      model,
+      requestContext: requestContextFromExtension,
+      executeAction: requestActionExecution,
+      onProgress: (step) => {
+        broadcast("dashboard", { type: "AGENT_STEP", step, timestamp: Date.now() });
+      },
+    });
+  } catch (err) {
+    console.error("[Agent] Failed to build:", err.message);
+    return null;
+  }
+}
+
+let browserAgent = buildBrowserAgent(activeAgentModel);
+if (browserAgent) console.log("[Agent] LangGraph browser agent ready");
+
+// ---------------------------------------------------------------------------
+// Guidance AI — multi-model support via LangChain
+// ---------------------------------------------------------------------------
+const GUIDANCE_SYSTEM_PROMPT = `You are CoLearn Assistant — an AI co-pilot that helps users understand and navigate web applications in real time.
 
 You receive:
 - A screenshot of the user's current browser tab
@@ -170,29 +218,40 @@ function buildContextText(context) {
   return parts.join("\n\n");
 }
 
-async function askGemini(userMessage, context) {
-  if (!geminiModel) {
-    return { text: "AI is not configured. Set GEMINI_API_KEY and restart.", highlights: [] };
+async function askAI(userMessage, context) {
+  if (!activeGuidanceModel) {
+    return { text: "No AI model configured. Add an API key to .env and restart.", highlights: [] };
   }
 
   const contextText = buildContextText(context);
 
   try {
-    const parts = [];
+    const model = createChatModel(activeGuidanceModel.provider, activeGuidanceModel.model);
+
+    // Build multimodal message with screenshot
+    const contentParts = [];
 
     if (context.screenshot) {
       const base64Data = context.screenshot.replace(/^data:image\/\w+;base64,/, "");
-      parts.push({ inlineData: { mimeType: "image/jpeg", data: base64Data } });
+      contentParts.push({
+        type: "image_url",
+        image_url: { url: `data:image/jpeg;base64,${base64Data}` },
+      });
     }
 
-    parts.push({
-      text: `${SYSTEM_PROMPT}\n\n--- PAGE CONTEXT ---\n${contextText}\n\n--- USER QUESTION ---\n${userMessage}`,
+    contentParts.push({
+      type: "text",
+      text: `--- PAGE CONTEXT ---\n${contextText}\n\n--- USER QUESTION ---\n${userMessage}`,
     });
 
-    const result = await geminiModel.generateContent(parts);
-    const raw = result.response.text();
+    const messages = [
+      new SystemMessage(GUIDANCE_SYSTEM_PROMPT),
+      new HumanMessage({ content: contentParts }),
+    ];
 
-    // Parse JSON response from Gemini
+    const result = await model.invoke(messages);
+    const raw = typeof result.content === "string" ? result.content : JSON.stringify(result.content);
+
     try {
       const cleaned = raw.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
       const parsed = JSON.parse(cleaned);
@@ -201,11 +260,10 @@ async function askGemini(userMessage, context) {
         highlights: Array.isArray(parsed.highlights) ? parsed.highlights : [],
       };
     } catch {
-      // Gemini didn't return JSON — treat as plain text
       return { text: raw, highlights: [] };
     }
   } catch (err) {
-    console.error("[AI] Gemini error:", err.message);
+    console.error(`[AI] ${activeGuidanceModel.provider} error:`, err.message);
     return { text: `AI error: ${err.message}`, highlights: [] };
   }
 }
@@ -224,12 +282,9 @@ async function buildAnnotatedImage(context, highlights) {
     const elIdx = h.elementIndex;
     const el = context.elements[elIdx];
     if (!el?.bounds) return null;
-
     return {
-      x: el.bounds.x,
-      y: el.bounds.y,
-      width: el.bounds.width,
-      height: el.bounds.height,
+      x: el.bounds.x, y: el.bounds.y,
+      width: el.bounds.width, height: el.bounds.height,
       label: h.label || `${i + 1}`,
       color: HIGHLIGHT_COLORS[i % HIGHLIGHT_COLORS.length],
     };
@@ -260,7 +315,10 @@ wss.on("connection", (ws, req) => {
       type: "INIT",
       events: recentEvents.slice(-50),
       screenshot: latestScreenshot,
-      aiEnabled: !!geminiModel,
+      aiEnabled,
+      providers: availableProviders,
+      activeAgentModel,
+      activeGuidanceModel,
     }));
   }
 
@@ -299,16 +357,34 @@ wss.on("connection", (ws, req) => {
         break;
       }
 
+      case "ACTION_RESULT": {
+        const pendingAction = pendingActionRequests.get(msg.requestId);
+        if (pendingAction) {
+          clearTimeout(pendingAction.timer);
+          pendingActionRequests.delete(msg.requestId);
+          if (msg.ok) pendingAction.resolve(msg.result || {});
+          else pendingAction.reject(new Error(msg.error || "Action failed"));
+        }
+        break;
+      }
+
       case "CHAT_MESSAGE": {
         handleChatMessage(msg.text, ws);
         break;
       }
 
+      case "STOP_CHAT": {
+        handleStopChat();
+        break;
+      }
+
+      case "SET_MODEL": {
+        handleSetModel(msg);
+        break;
+      }
+
       case "SHOW_GUIDANCE": {
-        sendToExtension({
-          type: "SHOW_GUIDANCE",
-          guides: msg.guides || [],
-        });
+        sendToExtension({ type: "SHOW_GUIDANCE", guides: msg.guides || [] });
         break;
       }
 
@@ -326,49 +402,139 @@ wss.on("connection", (ws, req) => {
 });
 
 // ---------------------------------------------------------------------------
-// Chat handler — the brain
+// Model switching at runtime
 // ---------------------------------------------------------------------------
-async function handleChatMessage(text, senderWs) {
-  const userMsg = {
-    type: "CHAT_MESSAGE",
-    text,
-    sender: "user",
+function handleSetModel(msg) {
+  const { target, provider, model } = msg;
+
+  const providerInfo = availableProviders.find(p => p.id === provider);
+  if (!providerInfo) {
+    broadcast("dashboard", {
+      type: "CHAT_MESSAGE", text: `Provider "${provider}" not available. Add the API key to .env.`,
+      sender: "system", timestamp: Date.now(),
+    });
+    return;
+  }
+
+  const modelInfo = providerInfo.models.find(m => m.id === model);
+  if (!modelInfo) {
+    broadcast("dashboard", {
+      type: "CHAT_MESSAGE", text: `Model "${model}" not found for ${provider}.`,
+      sender: "system", timestamp: Date.now(),
+    });
+    return;
+  }
+
+  const config = { provider, model };
+
+  if (target === "agent" || target === "both") {
+    activeAgentModel = config;
+    browserAgent = buildBrowserAgent(config);
+    console.log(`[Model] Agent switched to ${provider}/${model}`);
+  }
+
+  if (target === "guidance" || target === "both") {
+    activeGuidanceModel = config;
+    console.log(`[Model] Guidance switched to ${provider}/${model}`);
+  }
+
+  broadcast("dashboard", {
+    type: "MODEL_CHANGED",
+    activeAgentModel,
+    activeGuidanceModel,
     timestamp: Date.now(),
-  };
+  });
+
+  broadcast("dashboard", {
+    type: "CHAT_MESSAGE",
+    text: `Model switched to **${modelInfo.label}** (${providerInfo.name}) for ${target}.`,
+    sender: "system",
+    timestamp: Date.now(),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Chat handler — routes between GUIDANCE and ACTION modes
+// ---------------------------------------------------------------------------
+function handleStopChat() {
+  if (activeChatAbort) {
+    activeChatAbort.abort();
+    activeChatAbort = null;
+    console.log("[Chat] Stop requested by user");
+  }
+  broadcast("dashboard", { type: "AI_THINKING", thinking: false });
+  broadcast("dashboard", { type: "AGENT_STATUS", status: "idle", timestamp: Date.now() });
+  broadcast("dashboard", {
+    type: "CHAT_MESSAGE", text: "Stopped by user.",
+    sender: "system", timestamp: Date.now(),
+  });
+}
+
+async function handleChatMessage(text, senderWs) {
+  const userMsg = { type: "CHAT_MESSAGE", text, sender: "user", timestamp: Date.now() };
   pushEvent(userMsg);
   broadcast("dashboard", userMsg);
 
+  // Cancel any previous in-flight request
+  if (activeChatAbort) activeChatAbort.abort();
+  const abort = new AbortController();
+  activeChatAbort = abort;
+
+  // Gather page context BEFORE classifying intent so the classifier sees the page state
+  let pageContext = null;
+  try {
+    pageContext = await requestContextFromExtension();
+    if (abort.signal.aborted) return;
+    if (pageContext?.screenshot) {
+      latestScreenshot = { dataUrl: pageContext.screenshot, url: pageContext.url, timestamp: Date.now() };
+      broadcast("dashboard", { type: "SCREENSHOT", ...latestScreenshot });
+    }
+  } catch (err) {
+    console.warn(`[Chat] Context gather for classification failed: ${err.message}`);
+  }
+
+  if (abort.signal.aborted) return;
+
+  const intent = classifyIntent(text, pageContext);
+  console.log(`[Chat] Intent: "${intent}" for: "${text.slice(0, 60)}" (url: ${pageContext?.url || "unknown"})`);
+
+  if (intent === "action" && browserAgent) {
+    await handleAgentAction(text, abort.signal);
+  } else {
+    await handleGuidanceChat(text, pageContext, abort.signal);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GUIDANCE mode
+// ---------------------------------------------------------------------------
+async function handleGuidanceChat(text, prefetchedContext = null, signal = null) {
   broadcast("dashboard", { type: "AI_THINKING", thinking: true });
 
   try {
-    // 1. Gather context from extension
-    let context;
-    try {
-      context = await requestContextFromExtension();
-    } catch (err) {
-      context = { url: "unknown", title: "unknown", error: err.message };
+    // Reuse context already gathered during intent classification when available
+    let context = prefetchedContext;
+    if (!context) {
+      try { context = await requestContextFromExtension(); }
+      catch (err) { context = { url: "unknown", title: "unknown", error: err.message }; }
+
+      if (context.screenshot) {
+        latestScreenshot = { dataUrl: context.screenshot, url: context.url, timestamp: Date.now() };
+        broadcast("dashboard", { type: "SCREENSHOT", ...latestScreenshot });
+      }
     }
 
-    // 2. Update screen mirror
-    if (context.screenshot) {
-      latestScreenshot = {
-        dataUrl: context.screenshot,
-        url: context.url,
-        timestamp: Date.now(),
-      };
-      broadcast("dashboard", { type: "SCREENSHOT", ...latestScreenshot });
-    }
+    if (signal?.aborted) return;
 
-    // 3. Ask Gemini (returns structured { text, highlights })
-    const aiResult = await askGemini(text, context);
+    const aiResult = await askAI(text, context);
 
-    // 4. If AI highlighted elements, draw on the screenshot
+    if (signal?.aborted) return;
+
     let annotatedImage = null;
     if (aiResult.highlights.length > 0) {
       annotatedImage = await buildAnnotatedImage(context, aiResult.highlights);
     }
 
-    // 5. Build guidance data for on-page overlay
     const guidanceData = aiResult.highlights.map((h, i) => {
       const el = context.elements?.[h.elementIndex];
       if (!el?.bounds) return null;
@@ -381,37 +547,69 @@ async function handleChatMessage(text, senderWs) {
       };
     }).filter(Boolean);
 
-    // 6. Send AI response with optional annotated image and guidance
     const aiMsg = {
-      type: "CHAT_MESSAGE",
-      text: aiResult.text,
-      sender: "ai",
-      timestamp: Date.now(),
-      image: annotatedImage,
-      highlights: aiResult.highlights,
-      guidance: guidanceData,
-      context: { url: context.url, title: context.title },
+      type: "CHAT_MESSAGE", text: aiResult.text, sender: "ai", timestamp: Date.now(),
+      image: annotatedImage, highlights: aiResult.highlights,
+      guidance: guidanceData, context: { url: context.url, title: context.title },
     };
     pushEvent(aiMsg);
     broadcast("dashboard", aiMsg);
 
-    // 7. Auto-send guidance overlay to extension
     if (guidanceData.length > 0) {
-      sendToExtension({
-        type: "SHOW_GUIDANCE",
-        guides: guidanceData,
-      });
+      sendToExtension({ type: "SHOW_GUIDANCE", guides: guidanceData });
     }
 
   } catch (err) {
     broadcast("dashboard", {
-      type: "CHAT_MESSAGE",
-      text: `Error: ${err.message}`,
-      sender: "system",
-      timestamp: Date.now(),
+      type: "CHAT_MESSAGE", text: `Error: ${err.message}`,
+      sender: "system", timestamp: Date.now(),
     });
   } finally {
     broadcast("dashboard", { type: "AI_THINKING", thinking: false });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ACTION mode
+// ---------------------------------------------------------------------------
+async function handleAgentAction(text, signal = null) {
+  broadcast("dashboard", {
+    type: "AGENT_STATUS", status: "running",
+    message: `Agent running (${activeAgentModel?.provider}/${activeAgentModel?.model})...`,
+    timestamp: Date.now(),
+  });
+
+  try {
+    const result = await runBrowserAgent(browserAgent, text, null, signal);
+
+    if (signal?.aborted) return;
+
+    try {
+      const finalContext = await requestContextFromExtension();
+      if (finalContext.screenshot) {
+        latestScreenshot = { dataUrl: finalContext.screenshot, url: finalContext.url, timestamp: Date.now() };
+        broadcast("dashboard", { type: "SCREENSHOT", ...latestScreenshot });
+      }
+    } catch { /* ignore */ }
+
+    const aiMsg = {
+      type: "CHAT_MESSAGE", text: result.summary, sender: "ai", timestamp: Date.now(),
+      agentResult: { steps: result.steps, status: result.status },
+    };
+    pushEvent(aiMsg);
+    broadcast("dashboard", aiMsg);
+
+  } catch (err) {
+    if (signal?.aborted) return;
+    console.error("[Agent] Error:", err);
+    broadcast("dashboard", {
+      type: "CHAT_MESSAGE", text: `Agent error: ${err.message}`,
+      sender: "system", timestamp: Date.now(),
+    });
+  } finally {
+    if (!signal?.aborted) {
+      broadcast("dashboard", { type: "AGENT_STATUS", status: "idle", timestamp: Date.now() });
+    }
   }
 }
 
@@ -421,12 +619,21 @@ async function handleChatMessage(text, senderWs) {
 app.get("/api/health", (_req, res) => {
   res.json({
     status: "ok",
-    aiEnabled: !!geminiModel,
-    connections: {
-      extension: clients.extension.size,
-      dashboard: clients.dashboard.size,
-    },
+    aiEnabled,
+    agentEnabled: !!browserAgent,
+    activeAgentModel,
+    activeGuidanceModel,
+    providers: availableProviders,
+    connections: { extension: clients.extension.size, dashboard: clients.dashboard.size },
     events: recentEvents.length,
+  });
+});
+
+app.get("/api/models", (_req, res) => {
+  res.json({
+    providers: availableProviders,
+    activeAgentModel,
+    activeGuidanceModel,
   });
 });
 

@@ -14,6 +14,7 @@ function senderLabel(sender) {
     case "user": return "You";
     case "ai": return "CoLearn AI";
     case "system": return "System";
+    case "agent-step": return "Agent";
     default: return sender;
   }
 }
@@ -23,9 +24,20 @@ function senderClass(sender) {
     case "user": return "self";
     case "ai": return "ai";
     case "system": return "system";
+    case "agent-step": return "agent-step";
     default: return "other";
   }
 }
+
+const ACTION_ICONS = {
+  click: "\u25B6",
+  type: "\u2328",
+  scroll: "\u2195",
+  navigate: "\uD83C\uDF10",
+  press_key: "\u2318",
+  observe: "\uD83D\uDC41",
+  wait: "\u23F3",
+};
 
 function renderText(text) {
   if (!text) return null;
@@ -75,6 +87,33 @@ function HighlightLegend({ highlights }) {
   );
 }
 
+function AgentResult({ agentResult }) {
+  if (!agentResult) return null;
+  return (
+    <div className="agent-result-badge">
+      <span className="agent-result-icon">
+        {agentResult.status === "completed" ? "\u2713" : "\u26A0"}
+      </span>
+      <span>
+        Task {agentResult.status} in {agentResult.steps} step{agentResult.steps !== 1 ? "s" : ""}
+      </span>
+    </div>
+  );
+}
+
+function AgentStepBubble({ msg }) {
+  const icon = ACTION_ICONS[msg.agentAction] || "\u2699";
+  return (
+    <div className="chat-bubble agent-step">
+      <div className="agent-step-inner">
+        <span className="agent-step-icon">{icon}</span>
+        <span className="agent-step-text">{msg.text}</span>
+        <span className="agent-step-pulse" />
+      </div>
+    </div>
+  );
+}
+
 function GuidanceActions({ guidance, wsSend }) {
   const [overlayActive, setOverlayActive] = useState(false);
 
@@ -115,13 +154,87 @@ function GuidanceActions({ guidance, wsSend }) {
   );
 }
 
-export default function ChatPanel({ messages, onSend, connected, aiThinking, wsSend }) {
+function ModelSelector({ providers, activeModels, wsSend }) {
+  const [open, setOpen] = useState(false);
+
+  if (!providers?.length) return null;
+
+  const allModels = providers.flatMap((p) =>
+    p.models.map((m) => ({ ...m, providerName: p.name }))
+  );
+
+  const currentAgent = activeModels?.agent;
+  const currentGuidance = activeModels?.guidance;
+
+  const agentLabel = allModels.find(
+    (m) => m.provider === currentAgent?.provider && m.id === currentAgent?.model
+  )?.label || "Not set";
+
+  const guidanceLabel = allModels.find(
+    (m) => m.provider === currentGuidance?.provider && m.id === currentGuidance?.model
+  )?.label || "Not set";
+
+  const switchModel = (target, provider, model) => {
+    wsSend({ type: "SET_MODEL", target, provider, model });
+    setOpen(false);
+  };
+
+  return (
+    <div className="model-selector-wrapper">
+      <button
+        className="model-selector-btn"
+        onClick={() => setOpen(!open)}
+        title="Switch AI model"
+      >
+        <span className="model-icon">&#9881;</span>
+        <span className="model-current">{agentLabel}</span>
+      </button>
+      {open && (
+        <div className="model-dropdown">
+          <div className="model-dropdown-section">
+            <div className="model-dropdown-title">Agent Model</div>
+            {allModels.map((m) => (
+              <button
+                key={`agent-${m.id}`}
+                className={`model-option ${m.provider === currentAgent?.provider && m.id === currentAgent?.model ? "active" : ""}`}
+                onClick={() => switchModel("agent", m.provider, m.id)}
+              >
+                <span className="model-option-label">{m.label}</span>
+                <span className={`model-option-tier tier-${m.tier}`}>{m.tier}</span>
+                <span className="model-option-provider">{m.providerName}</span>
+              </button>
+            ))}
+          </div>
+          <div className="model-dropdown-section">
+            <div className="model-dropdown-title">Guidance Model</div>
+            {allModels.map((m) => (
+              <button
+                key={`guide-${m.id}`}
+                className={`model-option ${m.provider === currentGuidance?.provider && m.id === currentGuidance?.model ? "active" : ""}`}
+                onClick={() => switchModel("guidance", m.provider, m.id)}
+              >
+                <span className="model-option-label">{m.label}</span>
+                <span className={`model-option-tier tier-${m.tier}`}>{m.tier}</span>
+                <span className="model-option-provider">{m.providerName}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function ChatPanel({ messages, onSend, onStop, connected, aiThinking, agentStatus, providers, activeModels, wsSend }) {
   const [input, setInput] = useState("");
   const bottomRef = useRef(null);
 
+  const isAgentRunning = agentStatus?.status === "running";
+  const isBusy = aiThinking || isAgentRunning;
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length, aiThinking]);
+  }, [messages.length, aiThinking, isAgentRunning]);
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -134,48 +247,64 @@ export default function ChatPanel({ messages, onSend, connected, aiThinking, wsS
   return (
     <div className="chat-panel">
       <div className="chat-header">
-        <span className="chat-title">Chat</span>
-        <span className="chat-subtitle">
-          Ask anything — AI sees your screen
-        </span>
-        {aiThinking && <span className="thinking-badge">AI thinking...</span>}
+        <div className="chat-header-left">
+          <span className="chat-title">Chat</span>
+          <span className="chat-subtitle">
+            Ask anything or command the agent
+          </span>
+        </div>
+        <div className="chat-header-right">
+          {aiThinking && <span className="thinking-badge">AI thinking...</span>}
+          {isAgentRunning && <span className="thinking-badge agent-badge">Agent running...</span>}
+          <ModelSelector providers={providers} activeModels={activeModels} wsSend={wsSend} />
+        </div>
       </div>
 
       <div className="chat-messages">
-        {messages.length === 0 && !aiThinking && (
+        {messages.length === 0 && !isBusy && (
           <div className="chat-empty">
-            <div className="chat-empty-icon">💬</div>
-            <p>Ask about the current screen</p>
+            <div className="chat-empty-icon">🤖</div>
+            <p>Browser Agent + AI Guide</p>
             <span>
-              Try: "Where is the create button?" or "Show me how to navigate to settings"
+              <strong>Guide mode:</strong> "Where is the settings button?" "How do I create a new project?"
               <br />
-              AI will highlight elements on the screenshot and directly on the page.
+              <strong>Agent mode:</strong> "Click the search button" "Type hello in the search box" "Navigate to google.com"
+              <br /><br />
+              The AI auto-detects your intent — ask questions for guidance, or give commands for actions.
             </span>
           </div>
         )}
 
-        {messages.map((msg, i) => (
-          <div className={`chat-bubble ${senderClass(msg.sender)}`} key={i}>
-            <div className="bubble-sender">{senderLabel(msg.sender)}</div>
+        {messages.map((msg, i) => {
+          if (msg.sender === "agent-step") {
+            return <AgentStepBubble key={i} msg={msg} />;
+          }
 
-            {msg.image && <AnnotatedImage src={msg.image} />}
+          return (
+            <div className={`chat-bubble ${senderClass(msg.sender)}`} key={i}>
+              <div className="bubble-sender">{senderLabel(msg.sender)}</div>
 
-            {msg.highlights?.length > 0 && <HighlightLegend highlights={msg.highlights} />}
+              {msg.image && <AnnotatedImage src={msg.image} />}
 
-            {msg.guidance?.length > 0 && (
-              <GuidanceActions guidance={msg.guidance} wsSend={wsSend} />
-            )}
+              {msg.highlights?.length > 0 && <HighlightLegend highlights={msg.highlights} />}
 
-            <div className="bubble-text">{renderText(msg.text)}</div>
+              {msg.guidance?.length > 0 && (
+                <GuidanceActions guidance={msg.guidance} wsSend={wsSend} />
+              )}
 
-            {msg.context?.url && (
-              <div className="bubble-context">
-                Context: {msg.context.title || msg.context.url}
-              </div>
-            )}
-            <div className="bubble-meta">{formatTime(msg.timestamp)}</div>
-          </div>
-        ))}
+              {msg.agentResult && <AgentResult agentResult={msg.agentResult} />}
+
+              <div className="bubble-text">{renderText(msg.text)}</div>
+
+              {msg.context?.url && (
+                <div className="bubble-context">
+                  Context: {msg.context.title || msg.context.url}
+                </div>
+              )}
+              <div className="bubble-meta">{formatTime(msg.timestamp)}</div>
+            </div>
+          );
+        })}
 
         {aiThinking && (
           <div className="chat-bubble ai thinking">
@@ -183,6 +312,16 @@ export default function ChatPanel({ messages, onSend, connected, aiThinking, wsS
             <div className="thinking-status">Capturing screen &amp; analyzing...</div>
             <div className="thinking-dots">
               <span></span><span></span><span></span>
+            </div>
+          </div>
+        )}
+
+        {isAgentRunning && !messages.some((m) => m.isLiveStep) && (
+          <div className="chat-bubble agent-thinking">
+            <div className="bubble-sender">Browser Agent</div>
+            <div className="thinking-status">{agentStatus.message || "Analyzing the page..."}</div>
+            <div className="agent-progress-bar">
+              <div className="agent-progress-fill" />
             </div>
           </div>
         )}
@@ -196,20 +335,35 @@ export default function ChatPanel({ messages, onSend, connected, aiThinking, wsS
           className="chat-input"
           placeholder={
             !connected ? "Connecting..." :
+            isAgentRunning ? "Agent is working..." :
             aiThinking ? "AI is analyzing the screen..." :
-            "Ask about this page..."
+            "Ask a question or give a command..."
           }
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          disabled={!connected || aiThinking}
+          disabled={!connected || isBusy}
         />
-        <button
-          type="submit"
-          className="chat-send"
-          disabled={!connected || !input.trim() || aiThinking}
-        >
-          {aiThinking ? "..." : "Send"}
-        </button>
+        {isBusy ? (
+          <button
+            type="button"
+            className="chat-stop"
+            onClick={onStop}
+            title="Stop current operation"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="4" y="4" width="16" height="16" rx="2" />
+            </svg>
+            Stop
+          </button>
+        ) : (
+          <button
+            type="submit"
+            className="chat-send"
+            disabled={!connected || !input.trim()}
+          >
+            Send
+          </button>
+        )}
       </form>
     </div>
   );

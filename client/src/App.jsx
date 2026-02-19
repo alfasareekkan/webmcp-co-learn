@@ -11,6 +11,9 @@ export default function App() {
   const [chatMessages, setChatMessages] = useState([]);
   const [aiThinking, setAiThinking] = useState(false);
   const [aiEnabled, setAiEnabled] = useState(false);
+  const [agentStatus, setAgentStatus] = useState({ status: "idle" });
+  const [providers, setProviders] = useState([]);
+  const [activeModels, setActiveModels] = useState({ agent: null, guidance: null });
 
   // Resizable panels: chatRatio = fraction of main-content height for chat
   const [chatRatio, setChatRatio] = useState(0.45);
@@ -26,6 +29,13 @@ export default function App() {
         setEvents(data.events || []);
         if (data.screenshot) setScreenshot(data.screenshot);
         if (data.aiEnabled !== undefined) setAiEnabled(data.aiEnabled);
+        if (data.providers) setProviders(data.providers);
+        if (data.activeAgentModel || data.activeGuidanceModel) {
+          setActiveModels({ agent: data.activeAgentModel, guidance: data.activeGuidanceModel });
+        }
+        break;
+      case "MODEL_CHANGED":
+        setActiveModels({ agent: data.activeAgentModel, guidance: data.activeGuidanceModel });
         break;
       case "EVENT":
         setEvents((prev) => [...prev.slice(-200), data.event]);
@@ -39,7 +49,7 @@ export default function App() {
         break;
       case "CHAT_MESSAGE":
         setChatMessages((prev) => [
-          ...prev,
+          ...prev.filter((m) => !m.isLiveStep),
           {
             text: data.text,
             sender: data.sender,
@@ -48,11 +58,35 @@ export default function App() {
             image: data.image || null,
             highlights: data.highlights || [],
             guidance: data.guidance || [],
+            agentResult: data.agentResult || null,
           },
         ]);
         break;
       case "AI_THINKING":
         setAiThinking(data.thinking);
+        break;
+      case "AGENT_STATUS":
+        setAgentStatus({ status: data.status, message: data.message });
+        break;
+      case "AGENT_STEP":
+        setChatMessages((prev) => {
+          const existing = prev.findIndex(
+            (m) => m.sender === "agent-step" && m.isLiveStep
+          );
+          const stepMsg = {
+            text: data.step.description,
+            sender: "agent-step",
+            timestamp: data.timestamp,
+            agentAction: data.step.action,
+            isLiveStep: true,
+          };
+          if (existing >= 0) {
+            const updated = [...prev];
+            updated[existing] = stepMsg;
+            return updated;
+          }
+          return [...prev, stepMsg];
+        });
         break;
     }
   }, []);
@@ -61,6 +95,12 @@ export default function App() {
 
   const sendChat = (text) => {
     send({ type: "CHAT_MESSAGE", text });
+  };
+
+  const stopChat = () => {
+    send({ type: "STOP_CHAT" });
+    setAiThinking(false);
+    setAgentStatus({ status: "idle" });
   };
 
   // Drag handlers for the resizer
@@ -120,8 +160,12 @@ export default function App() {
         <ChatPanel
           messages={chatMessages}
           onSend={sendChat}
+          onStop={stopChat}
           connected={connected}
           aiThinking={aiThinking}
+          agentStatus={agentStatus}
+          providers={providers}
+          activeModels={activeModels}
           wsSend={send}
         />
       </main>
