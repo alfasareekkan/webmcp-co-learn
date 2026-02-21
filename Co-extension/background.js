@@ -67,6 +67,31 @@ async function handleBackendMessage(msg) {
     }
 
     try {
+      // Check if the active tab is a restricted URL (chrome://, about:, etc.)
+      const tab = await chrome.tabs.get(tabId);
+      if (isRestrictedUrl(tab.url)) {
+        // Return a minimal context — the debugger can't attach to these pages
+        // but the AI can still answer questions and handle navigation commands
+        wsSend({
+          type: "CONTEXT_RESPONSE", requestId, ok: true,
+          context: {
+            tabId,
+            url: tab.url,
+            title: tab.title || "New Tab",
+            screenshot: null,
+            viewport: { width: 1280, height: 800, dpr: 1 },
+            dom: { title: tab.title, url: tab.url, headings: [], links: [], buttons: [], inputs: [], bodyText: "" },
+            elements: [],
+            consoleLogs: [],
+            networkLogs: [],
+            performance: null,
+            timestamp: Date.now(),
+            restricted: true,
+          },
+        });
+        return;
+      }
+
       const context = await gatherFullContext(tabId);
       wsSend({ type: "CONTEXT_RESPONSE", requestId, ok: true, context });
     } catch (err) {
@@ -84,6 +109,17 @@ async function handleBackendMessage(msg) {
     }
 
     try {
+      // Navigation works on any tab — other actions need a normal page
+      if (msg.action.type !== "navigate") {
+        const tab = await chrome.tabs.get(tabId);
+        if (isRestrictedUrl(tab.url)) {
+          wsSend({
+            type: "ACTION_RESULT", requestId, ok: false,
+            error: `Cannot perform "${msg.action.type}" on a restricted page (${tab.url}). Navigate to a regular webpage first.`,
+          });
+          return;
+        }
+      }
       const result = await executeBrowserAction(tabId, msg.action);
       wsSend({ type: "ACTION_RESULT", requestId, ok: true, result });
     } catch (err) {
@@ -186,9 +222,23 @@ async function executeFigmaAction(tabId, action) {
 }
 
 // ---------------------------------------------------------------------------
+// Helper: check if a URL is a restricted chrome:// or internal URL
+// ---------------------------------------------------------------------------
+function isRestrictedUrl(url) {
+  if (!url) return true;
+  return /^(chrome|chrome-extension|devtools|edge|about|brave):\/\//i.test(url);
+}
+
+// ---------------------------------------------------------------------------
 // Execute browser actions via CDP Runtime.evaluate (JS-based, reliable)
 // ---------------------------------------------------------------------------
 async function executeBrowserAction(tabId, action) {
+  // Navigation can work without the debugger — handle it first so it works
+  // even when the active tab is a chrome:// page.
+  if (action.type === "navigate") {
+    return executeNavigation(tabId, action.url);
+  }
+
   const attached = await ensureAttached(tabId);
   if (!attached.ok) throw new Error(attached.error);
 
@@ -321,11 +371,8 @@ async function executeBrowserAction(tabId, action) {
     }
 
     case "navigate": {
-      await chrome.debugger.sendCommand({ tabId }, "Page.navigate", {
-        url: action.url,
-      });
-      await sleep(2000);
-      return { message: `Navigated to ${action.url}` };
+      // Handled above before debugger check, but keep as fallback
+      return executeNavigation(tabId, action.url);
     }
 
     case "press_key": {
@@ -437,6 +484,47 @@ function buildMouseEventChain(selectorStr) {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ---------------------------------------------------------------------------
+// Navigation — uses chrome.tabs.update so it works from ANY tab (including
+// chrome://, about:blank, new-tab pages) without needing the debugger.
+// After navigation, automatically attaches the debugger for future actions.
+// ---------------------------------------------------------------------------
+async function executeNavigation(tabId, url) {
+  if (!url) throw new Error("No URL provided for navigation");
+
+  // Normalise: add https:// if no protocol specified
+  if (!/^https?:\/\//i.test(url) && !/^[a-z]+:\/\//i.test(url)) {
+    url = `https://${url}`;
+  }
+
+  // Prevent navigating TO restricted pages
+  if (isRestrictedUrl(url)) {
+    throw new Error(`Cannot navigate to restricted URL: ${url}`);
+  }
+
+  // If the debugger was attached to this tab, detach first — the page is
+  // about to change completely and the old session will become stale.
+  if (state.debuggerAttached.has(tabId)) {
+    try { await chrome.debugger.detach({ tabId }); } catch {}
+    state.debuggerAttached.delete(tabId);
+  }
+
+  // Use the Tabs API — works on every tab regardless of its current URL
+  await chrome.tabs.update(tabId, { url });
+
+  // Wait for the page to start loading
+  await sleep(2500);
+
+  // Re-attach the debugger for subsequent actions on the new page
+  try {
+    await attachDebugger(tabId);
+  } catch (err) {
+    console.warn("[CoLearn] Post-navigate debugger attach:", err.message);
+  }
+
+  return { message: `Navigated to ${url}` };
 }
 
 // ---------------------------------------------------------------------------

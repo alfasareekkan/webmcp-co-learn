@@ -32,11 +32,14 @@
 | Track performance | CDP Performance.getMetrics (heap, nodes, layout) |
 | AI-powered Q&A (Guidance) | Multi-model vision AI processes screenshot + context |
 | Autonomous browser control (Agent) | LangGraph ReAct agent executes click, type, scroll, navigate, modify DOM |
-| Intent classification | Auto-routes between guidance mode and action mode |
+| General AI chat | ChatGPT/Gemini-style conversations for general knowledge questions |
+| LLM-based intent classification | AI model routes messages to action, guidance, or chat mode |
+| Smart navigation | `chrome.tabs.update` works from any tab including chrome:// pages |
 | Visual guidance | Server annotates screenshots with highlights, arrows, labels |
-| On-page overlay | Extension renders highlights, step badges, arrows directly on the website |
+| Non-blocking on-page overlay | Click-through highlights with auto-fade, Escape to dismiss |
 | Multi-model support | Gemini, Claude, OpenAI via LangChain — switchable at runtime |
 | Real-time sync | WebSocket streams events between extension, server, dashboard |
+| Desktop app | Electron app with floating chat popup (always-on-top) |
 
 ---
 
@@ -79,12 +82,23 @@
          │  │          │  │ OpenAI)  │  │            │ │
          │  └──────────┘  └────┬─────┘  └────────────┘ │
          │                     │                        │
-         │              ┌──────┴──────┐                 │
-         │              │  LangGraph  │                 │
-         │              │  Browser    │                 │
-         │              │  Agent      │                 │
-         │              │  (ReAct)    │                 │
-         │              └─────────────┘                 │
+         │  ┌─────────────┐ ┌──┴──────────┐            │
+         │  │  Intent     │ │  LangGraph  │            │
+         │  │  Classifier │ │  Browser    │            │
+         │  │  (LLM)      │ │  Agent      │            │
+         │  │             │ │  (ReAct)    │            │
+         │  └─────────────┘ └─────────────┘            │
+         └──────────────┬──────────────────────────────┘
+                        │ WebSocket
+                        │ (ws://localhost:3001?role=dashboard)
+         ┌──────────────┴──────────────────────────────┐
+         │     Electron Desktop App (optional)          │
+         │                                              │
+         │  ┌──────────────┐  ┌───────────────────────┐ │
+         │  │ Main Window  │  │ Floating Popup        │ │
+         │  │ (mirror of   │  │ (chat-only,           │ │
+         │  │  dashboard)  │  │  always-on-top)       │ │
+         │  └──────────────┘  └───────────────────────┘ │
          └─────────────────────────────────────────────┘
 ```
 
@@ -92,19 +106,21 @@
 
 - **Extension → Server**: WebSocket with `role=extension`
 - **Dashboard → Server**: WebSocket with `role=dashboard`
+- **Desktop App → Server**: WebSocket with `role=dashboard` (same protocol as React dashboard)
 - **Server → Extension**: Sends `GATHER_CONTEXT` and `EXECUTE_ACTION` requests
 - **Extension → Server**: Replies with `CONTEXT_RESPONSE` (screenshot + DOM + network + console + elements with bounding boxes + CSS selectors) or `ACTION_RESULT`
 - **Server → Dashboard**: Broadcasts events, screenshots, AI responses, annotated images, agent steps, model changes
 - **Server → Extension → overlay.js**: Relays `SHOW_GUIDANCE` / `CLEAR_GUIDANCE` for on-page rendering
 
-### Dual AI Modes
+### Three AI Modes
 
 | Mode | Triggered By | Processing | Output |
 |---|---|---|---|
-| **Guidance** | Questions ("Where is...", "How do I...") | LangChain vision model analyzes screenshot + context | Text answer + annotated screenshot + on-page overlay |
-| **Agent** | Commands ("Click the button", "Navigate to...") | LangGraph ReAct loop with browser tools | Autonomous multi-step browser actions + summary |
+| **Action** | Commands ("Open Figma", "Click the button", "Navigate to...") | LangGraph ReAct agent with browser tools | Autonomous multi-step browser actions + summary |
+| **Guidance** | Page-related questions ("Where is...?", "How do I create...?", "Guide me") | LangChain vision model analyzes screenshot + context | Text answer + annotated screenshot + on-page overlay |
+| **Chat** | General conversation ("What is React?", "Hello", "Tell me about CSS") | LangChain text model (no page context needed) | Direct AI response like ChatGPT/Gemini |
 
-Intent is classified automatically using pattern matching (`classifyIntent()` in `agent.js`).
+Intent is classified by the **LLM itself** (`classifyIntent()` in `agent.js`). The guidance model receives the user message and current page URL, then returns one of: `ACTION`, `GUIDANCE`, or `CHAT`. A lightweight regex-based fallback is used if the LLM call fails.
 
 ---
 
@@ -152,6 +168,16 @@ co-learn-3/
 │   ├── index.html
 │   ├── package.json              # Dependencies (react, react-dom, vite)
 │   └── vite.config.js
+│
+├── desktop/                      # Electron Desktop App
+│   ├── main.js                   # Electron main process — windows, IPC, popup management
+│   ├── preload.js                # Context bridge for IPC
+│   ├── renderer.js               # Main window renderer — chat, mirror, events, drawing
+│   ├── popup-renderer.js         # Floating popup chat renderer
+│   ├── index.html                # Main window HTML
+│   ├── popup.html                # Floating chat popup HTML
+│   ├── styles.css                # Desktop app styles
+│   └── package.json              # Electron dependency
 │
 ├── .gitignore
 └── DOCUMENTATION.md              # This file
@@ -229,8 +255,14 @@ All events are sent to the background via `chrome.runtime.sendMessage`.
 | `set_content` | Change text or HTML content of elements |
 | `execute_js` | Run arbitrary JavaScript on the page |
 | `scroll` | Scroll page up or down by pixel amount |
-| `navigate` | Navigate to a URL via CDP `Page.navigate` |
+| `navigate` | Navigate to a URL via `chrome.tabs.update` (works from any tab including chrome://) |
 | `press_key` | Dispatch keyboard events via CDP `Input.dispatchKeyEvent` |
+
+**Restricted URL Handling**:
+The extension detects `chrome://`, `about:`, `devtools://`, and other restricted URLs. When the active tab is on a restricted page:
+- **Context gathering** returns a minimal context (URL + title, no screenshot/DOM) so the AI can still respond
+- **Navigation** works from any tab — uses `chrome.tabs.update()` instead of CDP, automatically re-attaches the debugger after navigation
+- **Other actions** (click, type, etc.) return a descriptive error asking the user to navigate to a regular webpage first
 
 ---
 
@@ -267,7 +299,7 @@ All events are sent to the background via `chrome.runtime.sendMessage`.
 | Extension | `SCREENSHOT` | Store latest + broadcast |
 | Extension | `CONTEXT_RESPONSE` | Resolve pending context request |
 | Extension | `ACTION_RESULT` | Resolve pending action request |
-| Dashboard | `CHAT_MESSAGE` | Classify intent → guidance or agent pipeline |
+| Dashboard | `CHAT_MESSAGE` | LLM classifies intent → action, guidance, or chat pipeline |
 | Dashboard | `SET_MODEL` | Switch active AI model at runtime |
 | Dashboard | `SHOW_GUIDANCE` | Relay to extension for on-page overlay |
 | Dashboard | `CLEAR_GUIDANCE` | Relay to extension to remove overlay |
@@ -404,11 +436,15 @@ START → observe → agent → (tools | done_handler | END)
 Each element includes: tag name, CSS selector, text, bounding box, role, ID, type, href, and computed styles (color, background).
 
 **Intent Classification** (`classifyIntent()`):
-Uses two sets of regex patterns to score user messages:
-- **Action patterns** — click, type, navigate, scroll, create, delete, change, submit, select, drag, login, search, close, copy, refresh
-- **Guidance patterns** — how, where, what, show me, explain, guide, which, why
+Uses the **LLM itself** to classify user messages into one of three categories:
 
-The mode with the higher score wins. Ties default to guidance.
+| Category | When Used | Examples |
+|---|---|---|
+| **ACTION** | User wants the AI to physically do something in the browser | "Open Figma", "Click the submit button", "Navigate to Google Sheets" |
+| **GUIDANCE** | User is asking about what they see on screen / needs step-by-step help | "Where is the search bar?", "How do I create a new design in Figma?", "Guide me" |
+| **CHAT** | General conversation, knowledge questions, greetings, off-topic | "What is React?", "Hello", "Explain CSS flexbox" |
+
+The classifier sends the user message + current page URL to the model with a `CLASSIFY_PROMPT`. The model replies with a single word. A regex-based `classifyIntentFallback()` is used if the LLM call fails or no model is available.
 
 ---
 
@@ -469,25 +505,53 @@ The mode with the higher score wins. Ties default to guidance.
 
 ### Step 11 — On-Page Guidance Overlay (overlay.js)
 
-**Goal**: Render visual guides directly on the website the user is browsing.
+**Goal**: Render visual guides directly on the website the user is browsing **without blocking interaction**.
+
+**Design principles**:
+- All visual elements are `pointer-events: none` — users can click through highlights to interact with the page
+- Auto-fade after 6 seconds for an unobtrusive experience
+- Keyboard dismissal via Escape key
 
 **Features**:
-- **Pulsing highlight boxes** — colored borders with glow animation around target elements
-- **Numbered step badges** — clickable pills above each element with label text
-- **Tooltips** — pop-up explanations positioned beside highlighted elements
-- **Curved arrows** — dashed SVG arrows connecting sequential steps
+- **Thin dashed highlight borders** — non-blocking colored outlines around target elements
+- **Small numbered pins** — positioned at element corners instead of large badges
+- **Tooltips** — shown only in step-by-step mode, positioned beside highlighted elements
+- **Curved arrows** — dashed SVG arrows connecting sequential steps (non-blocking)
 - **Step-by-step mode** — Prev/Next buttons to walk through one element at a time
 - **Show-all mode** — display all highlights simultaneously
-- **Controls bar** — fixed bottom bar with navigation, "Show All", and "Dismiss" buttons
-- **Dismiss** — removes all overlay elements
+- **Floating pill control** — small bottom-right pill with controls (only interactive element, `pointer-events: auto`)
+- **Auto-fade** — visuals fade out after 6 seconds, un-fade on control hover
+- **Escape to dismiss** — keyboard shortcut to clear all overlay elements
 
 **Triggered by**:
 1. **Auto** — AI responses with highlights automatically send `SHOW_GUIDANCE` to the extension
-2. **Manual** — "Show on Page" / "Clear Overlay" buttons in the chat panel
+2. **Manual** — "Show on Page" / "Clear Overlay" buttons in the chat panel or Electron popup
 
 ---
 
-### Step 12 — Element Bounding Box & Selector Extraction
+### Step 12 — Electron Desktop App (desktop/)
+
+**Goal**: Provide a native desktop experience with a floating chat popup accessible via system tray or hotkey.
+
+**Technology**: Electron
+
+**Files**:
+- `main.js` — Main process: creates main window and floating popup, manages IPC, handles window positioning, system tray integration
+- `renderer.js` — Main window renderer: mirrors the React dashboard functionality (chat, screen mirror, events, drawing)
+- `popup-renderer.js` — Floating popup renderer: lightweight chat-only interface that connects to the backend via WebSocket
+  - "Show on Page" guidance button on AI messages with highlights
+  - Sends `SHOW_GUIDANCE` / `CLEAR_GUIDANCE` to the server to trigger on-page overlay from the desktop app
+- `index.html` / `popup.html` — HTML shells for the two window types
+- `styles.css` — Desktop-specific styling
+
+**Running**:
+```bash
+cd desktop && npx electron .
+```
+
+---
+
+### Step 13 — Element Bounding Box & Selector Extraction
 
 **Goal**: Give the AI precise pixel locations and reliable CSS selectors for all interactive elements.
 
@@ -540,15 +604,48 @@ overlay.js                        │◄── SHOW_GUIDANCE ──────�
     │◄── STEP_GUIDANCE ───────────│                            │
 ```
 
+### Chat Message Pipeline — Intent Router
+
+```
+User types any message
+        │
+        ▼
+Dashboard ──CHAT_MESSAGE──► Server
+        │
+        ├── Attempt to gather page context from extension
+        │   (gracefully handles failure — returns minimal context)
+        │
+        ├── classifyIntent(text, context, model)  ← LLM call
+        │         │
+        │         ├── "action"   → Agent pipeline (or falls back to chat if no agent)
+        │         ├── "guidance" → Guidance pipeline (visual Q&A)
+        │         └── "chat"     → Normal chat pipeline (general AI conversation)
+```
+
+### Chat Message Pipeline — Normal Chat Mode
+
+```
+User types general question (e.g. "What is Google Sheets?")
+        │
+        ▼
+Server classifyIntent() → "chat"
+        │
+        ├── Echo user message to all dashboards
+        ├── Set AI_THINKING = true
+        ├── Send message to LangChain model (text-only, no screenshot)
+        │     System prompt: "You are CoLearn Assistant — a helpful, friendly AI assistant..."
+        ├── Send AI response as CHAT_MESSAGE
+        └── Set AI_THINKING = false
+```
+
 ### Chat Message Pipeline — Guidance Mode
 
 ```
 User types question (e.g. "Where is the search bar?")
         │
         ▼
-Dashboard ──CHAT_MESSAGE──► Server
+Server classifyIntent() → "guidance"
                                │
-                               ├── classifyIntent() → "guidance"
                                ├── Echo user message to all dashboards
                                ├── Set AI_THINKING = true
                                ├── Send GATHER_CONTEXT to extension
@@ -594,9 +691,8 @@ Dashboard ──CHAT_MESSAGE──► Server
 User types command (e.g. "Click the search button and type hello")
         │
         ▼
-Dashboard ──CHAT_MESSAGE──► Server
+Server classifyIntent() → "action"
                                │
-                               ├── classifyIntent() → "action"
                                ├── Echo user message to all dashboards
                                ├── Send AGENT_STATUS = "running"
                                ├── Gather initial context from extension
@@ -734,6 +830,15 @@ Server handleSetModel()
   context: { url: "...", title: "..." },
 }
 
+// AI normal chat response (no highlights, no image)
+{
+  type: "CHAT_MESSAGE",
+  text: "Google Sheets is a free, web-based spreadsheet application by Google...",
+  sender: "ai",
+  timestamp: ...,
+  context: { url: "...", title: "..." },
+}
+
 // AI agent response
 {
   type: "CHAT_MESSAGE",
@@ -833,6 +938,9 @@ cd server && npm start
 
 # Terminal 2 — Frontend
 cd client && npm run dev
+
+# Terminal 3 — Desktop App (optional)
+cd desktop && npx electron .
 ```
 
 ### 6. Use It
@@ -841,9 +949,10 @@ cd client && npm run dev
 2. Open any other tab (e.g. Figma, Google, any website)
 3. Click the **CL** extension icon → **Attach Debugger**
 4. Go back to the dashboard — activity events appear in the sidebar
-5. **Guidance mode**: Ask a question → "Where is the search bar?" → AI analyzes screen and highlights elements
-6. **Agent mode**: Give a command → "Click the login button" → Agent autonomously controls the browser
-7. Use the gear icon in chat header to switch between AI models
+5. **Chat mode**: Ask anything → "What is Figma?" → AI answers like ChatGPT/Gemini
+6. **Guidance mode**: Ask about the page → "Where is the search bar?" → AI analyzes screen and highlights elements
+7. **Agent mode**: Give a command → "Open Figma" or "Click the login button" → Agent controls the browser
+8. Use the gear icon in chat header to switch between AI models
 
 ---
 
@@ -998,9 +1107,13 @@ cd client && npm run dev
   - Enhanced element extraction: 80 elements with selectors + computed styles
   - React-compatible event dispatching for type actions
   - Max 20 steps per task with graceful completion
-- [x] **Intent Classification** — Auto-detect guidance vs action intent
-  - Regex-based scoring with action and guidance pattern sets
-  - Seamless dual-mode operation from a single chat input
+- [x] **LLM-Based Intent Classification** — AI-powered routing to action, guidance, or chat
+  - LLM classifies each message into ACTION, GUIDANCE, or CHAT
+  - Regex-based fallback if the LLM call fails
+  - Three-mode operation from a single chat input
+- [x] **Normal Chat Mode** — General AI conversation without page context
+  - ChatGPT/Gemini-style responses for knowledge questions, greetings, general help
+  - Falls back from action mode when no agent is available
 - [x] **Agent UI** — Live progress in the dashboard
   - Agent step bubbles with action icons
   - Agent result badges (status + step count)
@@ -1008,6 +1121,31 @@ cd client && npm run dev
   - Agent status broadcasting
 - [x] **Resizable Dashboard Panels** — Drag-to-resize screen mirror / chat split
 - [x] **Collapsible Sidebar** — Toggle sidebar open/closed
+
+### Phase 3.5 (Complete) — Navigation Fix, Overlay Redesign & Desktop App
+
+- [x] **Smart Navigation** — `chrome.tabs.update` instead of CDP for navigation
+  - Works from any tab including chrome://, about:, devtools:// pages
+  - Automatic debugger re-attach after navigation
+  - Graceful restricted URL handling (minimal context returned)
+- [x] **Non-Blocking Overlay Redesign** — Complete overlay.js rewrite
+  - All highlights are `pointer-events: none` — users can click through
+  - Thin dashed borders instead of opaque boxes
+  - Small numbered pins instead of large badges
+  - Auto-fade after 6 seconds, un-fade on hover
+  - Floating pill control at bottom-right
+  - Escape key to dismiss
+- [x] **LLM-Based Intent Classification** — Replaced regex classifier with AI
+  - Model decides between ACTION, GUIDANCE, or CHAT
+  - Regex fallback for resilience
+- [x] **Normal Chat Mode** — ChatGPT-style general conversation
+  - No page context needed for general questions
+  - Separate system prompt for conversational responses
+- [x] **Electron Desktop App** — Native desktop experience
+  - Main window mirrors React dashboard functionality
+  - Floating popup chat window (always-on-top)
+  - "Show on Page" guidance button triggers on-page overlay from desktop
+  - WebSocket connection to the same backend
 
 ### Phase 4 (Future) — Context Understanding & Advanced Guidance
 
@@ -1027,4 +1165,4 @@ cd client && npm run dev
 
 ---
 
-*Generated from the co-learn-3 codebase. Last updated: February 2026.*
+*Generated from the co-learn-3 codebase. Last updated: February 20, 2026.*

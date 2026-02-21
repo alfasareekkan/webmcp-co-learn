@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src ws://localhost:3001; img-src 'self' data: blob:;" />
+  <title>CoLearn</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Invisible drag region for macOS traffic lights -->
+  <div class="titlebar-drag"></div>
+
+  <div class="app-layout" id="app">
+    <!-- Sidebar toggle -->
+    <button class="sidebar-toggle" id="sidebarToggle" title="Toggle sidebar">&#9664;</button>
+
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">CL</div>
+        <h1>CoLearn</h1>
+        <span class="conn-badge off" id="connBadge">Offline</span>
+      </div>
+      <div class="sidebar-section-title">Activity Feed</div>
+      <div class="event-list" id="eventList">
+        <div class="empty">Waiting for events...<br><span>Browse other tabs with the extension active</span></div>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content" id="mainContent">
+      <!-- Screen Mirror -->
+      <div class="mirror-container" id="mirrorContainer">
+        <div class="mirror-header">
+          <span class="mirror-title">Screen Mirror</span>
+          <span class="mirror-meta" id="mirrorMeta"></span>
+          <button class="mirror-draw-btn" id="drawBtn" style="display:none">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+            Draw
+          </button>
+        </div>
+        <div class="mirror-viewport" id="mirrorViewport">
+          <div class="mirror-empty">
+            <div class="mirror-icon">&#128421;</div>
+            <p>No screenshot yet</p>
+            <span>Attach the debugger from the extension popup, then click Screenshot</span>
+          </div>
+        </div>
+        <div class="mirror-saved-strip" id="savedStrip" style="display:none"></div>
+      </div>
+
+      <!-- Resizer -->
+      <div class="resizer" id="resizer"><div class="resizer-handle"></div></div>
+
+      <!-- Chat Panel -->
+      <div class="chat-panel" id="chatPanel">
+        <div class="chat-header">
+          <div class="chat-header-left">
+            <span class="chat-title">Chat</span>
+            <span class="chat-subtitle">Ask anything or command the agent</span>
+          </div>
+          <div class="chat-header-right">
+            <span class="thinking-badge" id="thinkingBadge" style="display:none">AI thinking...</span>
+            <span class="thinking-badge agent-badge" id="agentBadge" style="display:none">Agent running...</span>
+            <div class="model-selector-wrapper" id="modelSelector" style="display:none">
+              <button class="model-selector-btn" id="modelBtn">
+                <span class="model-icon">&#9881;</span>
+                <span class="model-current" id="modelLabel">Not set</span>
+              </button>
+              <div class="model-dropdown hidden" id="modelDropdown"></div>
+            </div>
+          </div>
+        </div>
+        <div class="chat-messages" id="chatMessages">
+          <div class="chat-empty" id="chatEmpty">
+            <div class="chat-empty-icon">&#129302;</div>
+            <p>Browser Agent + AI Guide</p>
+            <span>
+              <strong>Guide mode:</strong> "Where is the settings button?" "How do I create a new project?"<br>
+              <strong>Agent mode:</strong> "Click the search button" "Type hello in the search box"<br><br>
+              The AI auto-detects your intent — ask questions for guidance, or give commands for actions.
+            </span>
+          </div>
+        </div>
+        <form class="chat-input-bar" id="chatForm">
+          <input type="text" class="chat-input" id="chatInput" placeholder="Connecting..." disabled />
+          <button type="submit" class="chat-send" id="chatSendBtn" disabled>Send</button>
+        </form>
+      </div>
+    </main>
+  </div>
+
+  <!-- Drawing overlay (hidden by default) -->
+  <div class="drawing-overlay hidden" id="drawingOverlay">
+    <div class="drawing-toolbar" id="drawingToolbar"></div>
+    <div class="drawing-canvas-container" id="drawingCanvasContainer">
+      <canvas id="drawingBase"></canvas>
+      <canvas id="drawingOverlayCanvas"></canvas>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

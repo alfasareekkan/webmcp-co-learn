@@ -1,0 +1,13 @@
+{
+  "name": "colearn-desktop",
+  "version": "1.0.0",
+  "description": "CoLearn AI Desktop Chat",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron ."
+  },
+  "devDependencies": {
+    "electron": "33.4.0"
+  }
+}

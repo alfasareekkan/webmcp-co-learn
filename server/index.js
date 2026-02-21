@@ -137,14 +137,16 @@ if (browserAgent) console.log("[Agent] LangGraph browser agent ready");
 // ---------------------------------------------------------------------------
 // Guidance AI — multi-model support via LangChain
 // ---------------------------------------------------------------------------
-const GUIDANCE_SYSTEM_PROMPT = `You are CoLearn Assistant — an AI co-pilot that helps users understand and navigate web applications in real time.
+const GUIDANCE_SYSTEM_PROMPT = `You are CoLearn Assistant — an AI co-pilot that helps users understand and navigate web applications in real time. You also serve as a general-purpose AI assistant — you can answer any question, have conversations, and help with tasks just like ChatGPT or Gemini.
 
-You receive:
+You MAY receive:
 - A screenshot of the user's current browser tab
 - DOM structure (headings, buttons, links, inputs, forms, text)
 - Interactive elements with their pixel-level bounding boxes
 - Recent network requests and console logs
 - Performance metrics
+
+If the page context is minimal or missing (e.g. the user is on a new tab or chrome:// page), just answer the question directly as a helpful AI assistant. You don't need page context to answer general knowledge questions, have conversations, or explain concepts.
 
 RESPONSE FORMAT — You MUST reply with valid JSON (no markdown fences). Use this exact structure:
 
@@ -163,10 +165,11 @@ RULES:
 - "text" is always required — your main answer.
 - "highlights" is an array of elements to visually highlight on the screenshot. Include it when the user asks WHERE something is, HOW to do something, or when pointing out specific UI elements helps.
 - "elementIndex" refers to the index in the ELEMENTS array provided in the context.
-- If no visual highlighting is needed (general questions, explanations), set "highlights" to an empty array [].
+- If no visual highlighting is needed (general questions, explanations, conversations), set "highlights" to an empty array [].
 - Keep text concise and actionable.
 - When highlighting, describe the element location in text too (e.g., "top-right corner", "in the sidebar").
-- Use numbered labels (1, 2, 3) when highlighting multiple elements to show a sequence/pathway.`;
+- Use numbered labels (1, 2, 3) when highlighting multiple elements to show a sequence/pathway.
+- For general knowledge questions (not related to the current page), just answer naturally. You are a full AI assistant, not just a browser helper.`;
 
 function buildContextText(context) {
   const parts = [];
@@ -480,7 +483,7 @@ async function handleChatMessage(text, senderWs) {
   const abort = new AbortController();
   activeChatAbort = abort;
 
-  // Gather page context BEFORE classifying intent so the classifier sees the page state
+  // Gather page context so the classifier sees the current page
   let pageContext = null;
   try {
     pageContext = await requestContextFromExtension();
@@ -490,18 +493,39 @@ async function handleChatMessage(text, senderWs) {
       broadcast("dashboard", { type: "SCREENSHOT", ...latestScreenshot });
     }
   } catch (err) {
-    console.warn(`[Chat] Context gather for classification failed: ${err.message}`);
+    console.warn(`[Chat] Context gather failed: ${err.message}`);
   }
 
   if (abort.signal.aborted) return;
 
-  const intent = classifyIntent(text, pageContext);
+  // Use LLM to classify: action | guidance | chat
+  let classifierModel = null;
+  try {
+    if (activeGuidanceModel) {
+      classifierModel = createChatModel(activeGuidanceModel.provider, activeGuidanceModel.model);
+    }
+  } catch {}
+
+  const intent = await classifyIntent(text, pageContext, classifierModel);
   console.log(`[Chat] Intent: "${intent}" for: "${text.slice(0, 60)}" (url: ${pageContext?.url || "unknown"})`);
 
-  if (intent === "action" && browserAgent) {
-    await handleAgentAction(text, abort.signal);
-  } else {
-    await handleGuidanceChat(text, pageContext, abort.signal);
+  if (abort.signal.aborted) return;
+
+  switch (intent) {
+    case "action":
+      if (browserAgent) {
+        await handleAgentAction(text, abort.signal);
+      } else {
+        await handleNormalChat(text, pageContext, abort.signal);
+      }
+      break;
+    case "guidance":
+      await handleGuidanceChat(text, pageContext, abort.signal);
+      break;
+    case "chat":
+    default:
+      await handleNormalChat(text, pageContext, abort.signal);
+      break;
   }
 }
 
@@ -516,9 +540,14 @@ async function handleGuidanceChat(text, prefetchedContext = null, signal = null)
     let context = prefetchedContext;
     if (!context) {
       try { context = await requestContextFromExtension(); }
-      catch (err) { context = { url: "unknown", title: "unknown", error: err.message }; }
+      catch (err) {
+        context = {
+          url: "unknown", title: "unknown", error: err.message,
+          dom: {}, elements: [], screenshot: null,
+        };
+      }
 
-      if (context.screenshot) {
+      if (context?.screenshot) {
         latestScreenshot = { dataUrl: context.screenshot, url: context.url, timestamp: Date.now() };
         broadcast("dashboard", { type: "SCREENSHOT", ...latestScreenshot });
       }
@@ -562,6 +591,52 @@ async function handleGuidanceChat(text, prefetchedContext = null, signal = null)
   } catch (err) {
     broadcast("dashboard", {
       type: "CHAT_MESSAGE", text: `Error: ${err.message}`,
+      sender: "system", timestamp: Date.now(),
+    });
+  } finally {
+    broadcast("dashboard", { type: "AI_THINKING", thinking: false });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CHAT mode — general conversation (like ChatGPT / Gemini)
+// No page context needed, no highlights, just a helpful AI response.
+// ---------------------------------------------------------------------------
+const CHAT_SYSTEM_PROMPT = `You are CoLearn Assistant — a helpful, friendly AI assistant. Answer questions, have conversations, explain concepts, and help with anything the user asks. Be concise and clear. Use **bold** for emphasis when helpful. You can use markdown-style formatting.`;
+
+async function handleNormalChat(text, prefetchedContext = null, signal = null) {
+  broadcast("dashboard", { type: "AI_THINKING", thinking: true });
+
+  try {
+    if (!activeGuidanceModel) {
+      broadcast("dashboard", {
+        type: "CHAT_MESSAGE", text: "No AI model configured. Add an API key to .env and restart.",
+        sender: "system", timestamp: Date.now(),
+      });
+      return;
+    }
+
+    const model = createChatModel(activeGuidanceModel.provider, activeGuidanceModel.model);
+    const result = await model.invoke([
+      new SystemMessage(CHAT_SYSTEM_PROMPT),
+      new HumanMessage(text),
+    ]);
+
+    if (signal?.aborted) return;
+
+    const raw = typeof result.content === "string" ? result.content : JSON.stringify(result.content);
+
+    const aiMsg = {
+      type: "CHAT_MESSAGE", text: raw, sender: "ai", timestamp: Date.now(),
+      context: prefetchedContext ? { url: prefetchedContext.url, title: prefetchedContext.title } : null,
+    };
+    pushEvent(aiMsg);
+    broadcast("dashboard", aiMsg);
+
+  } catch (err) {
+    if (signal?.aborted) return;
+    broadcast("dashboard", {
+      type: "CHAT_MESSAGE", text: `AI error: ${err.message}`,
       sender: "system", timestamp: Date.now(),
     });
   } finally {

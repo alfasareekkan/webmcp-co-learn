@@ -564,79 +564,84 @@ export async function runBrowserAgent(agent, userMessage, initialContext, signal
 }
 
 // ---------------------------------------------------------------------------
-// Intent classification — context-aware (page state influences routing)
+// Intent classification — LLM-based
+// Uses the AI model itself to decide how to route the user's message.
+// Returns: "action" | "guidance" | "chat"
 // ---------------------------------------------------------------------------
-const ACTION_PATTERNS = [
-  /\b(click|tap|press|hit)\b/i,
-  /\b(type|enter|write|fill|input)\s+(in|into|on)?\b/i,
-  /\b(navigate|go\s+to|open|visit|browse)\b/i,
-  /\b(scroll|swipe)\b/i,
-  /\b(create|add|make|build|new|insert)\b/i,
-  /\b(delete|remove|clear|erase)\b/i,
-  /\b(change|modify|update|edit|set|switch|toggle)\b/i,
-  /\b(submit|send|post|upload|download)\b/i,
-  /\b(select|choose|pick|check|uncheck)\b/i,
-  /\b(drag|drop|move|resize)\b/i,
-  /\b(login|sign\s*in|sign\s*up|register|logout|sign\s*out)\b/i,
-  /\b(search\s+for|look\s+up|find\s+and)\b/i,
-  /\b(close|dismiss|cancel|confirm|accept|deny)\b/i,
-  /\b(copy|paste|cut)\b/i,
-  /\b(refresh|reload)\b/i,
-];
+const CLASSIFY_PROMPT = `You are an intent router for a browser co-pilot app called CoLearn. Your ONLY job is to classify the user's message into exactly one of three categories. Reply with a single word — nothing else.
 
-const GUIDANCE_PATTERNS = [
-  /\b(how\s+(do|can|to|would|should))\b/i,
-  /\b(where\s+(is|are|can|do))\b/i,
-  /\b(what\s+(is|are|does|do))\b/i,
-  /\b(show\s+me|point\s+out|highlight|indicate)\b/i,
-  /\b(explain|describe|tell\s+me)\b/i,
-  /\b(guide|help\s+me\s+understand|walk\s+me)\b/i,
-  /\b(which|why|when)\b/i,
-  /\bwhat('s|\s+is)\s+this\b/i,
-  /\b(can\s+you\s+explain|could\s+you\s+show)\b/i,
-];
+Categories:
+- ACTION — The user wants you to DO something in the browser: open a page, click a button, navigate somewhere, type text, scroll, create/delete/modify something on the page, log in, fill a form, etc. This includes polite commands like "can you open...", "please click...", "open figma for me".
+- GUIDANCE — The user wants help understanding the current page or app: "where is the settings button?", "how do I create a new screen in Figma?", "show me how to export", "guide me through this", "what does this button do?". The user wants to LEARN, not have the agent act.
+- CHAT — General conversation or knowledge questions NOT about controlling or navigating the browser: "what is React?", "tell me a joke", "explain CSS flexbox", "hi", "thanks", "who invented the internet?".
 
-// Interactive-heavy page types that bias toward action
-const ACTION_BIASED_URLS = [
-  /docs\.google\.com\/spreadsheets/i,
-  /figma\.com/i,
-  /notion\.so/i,
-  /github\.com/i,
-  /gitlab\.com/i,
-  /jira/i,
-  /trello/i,
-];
+Examples:
+"open figma" → ACTION
+"can you open google sheets?" → ACTION
+"click the search button" → ACTION
+"navigate to github.com" → ACTION
+"create a new file" → ACTION
+"how do I create a new screen?" → GUIDANCE
+"where is the export button?" → GUIDANCE
+"guide me how to use this tool" → GUIDANCE
+"show me where the settings are" → GUIDANCE
+"what is figma?" → CHAT
+"hello" → CHAT
+"tell me about javascript" → CHAT
+"thanks!" → CHAT
+"what's the weather today?" → CHAT
+
+Reply ONLY with: ACTION, GUIDANCE, or CHAT`;
 
 /**
- * Classify user intent with optional page context.
- * When pageContext is provided, the URL and element density further inform the decision.
+ * Classify user intent using the LLM. Falls back to a simple heuristic
+ * if the LLM call fails (e.g. network error, no API key).
  */
-export function classifyIntent(text, pageContext = null) {
-  let actionScore = ACTION_PATTERNS.reduce(
-    (score, pattern) => score + (pattern.test(text) ? 1 : 0), 0
-  );
-  let guidanceScore = GUIDANCE_PATTERNS.reduce(
-    (score, pattern) => score + (pattern.test(text) ? 1 : 0), 0
-  );
-
-  if (pageContext) {
-    const url = pageContext.url || "";
-    if (ACTION_BIASED_URLS.some(p => p.test(url))) {
-      actionScore += 1;
-    }
-
-    const elementCount = pageContext.elements?.length || 0;
-    if (elementCount > 30) actionScore += 0.5;
-
-    const hasInputs = pageContext.elements?.some(el =>
-      el.tag === "INPUT" || el.tag === "TEXTAREA" || el.tag === "SELECT"
-    );
-    if (hasInputs && /\b(type|fill|enter|input|write)\b/i.test(text)) {
-      actionScore += 1;
+export async function classifyIntent(text, pageContext, model) {
+  // Try LLM classification first
+  if (model) {
+    try {
+      const contextHint = pageContext?.url
+        ? `\n(User is currently on: ${pageContext.url})`
+        : "";
+      const result = await model.invoke([
+        new SystemMessage(CLASSIFY_PROMPT),
+        new HumanMessage(`${text}${contextHint}`),
+      ]);
+      const raw = (typeof result.content === "string" ? result.content : "")
+        .trim().toUpperCase();
+      if (raw.includes("ACTION")) return "action";
+      if (raw.includes("GUIDANCE")) return "guidance";
+      if (raw.includes("CHAT")) return "chat";
+    } catch (err) {
+      console.warn("[Classify] LLM classification failed, using fallback:", err.message);
     }
   }
 
-  if (actionScore > guidanceScore) return "action";
-  if (guidanceScore > 0) return "guidance";
-  return actionScore > 0 ? "action" : "guidance";
+  // --- Lightweight fallback (no LLM available) ---
+  return classifyIntentFallback(text);
+}
+
+function classifyIntentFallback(text) {
+  const t = text.toLowerCase().trim();
+
+  // Obvious action commands
+  if (/^\s*(open|click|tap|navigate|go\s+to|visit|scroll|type|press|create|delete|remove|close|submit|login|sign\s*in|refresh)\b/i.test(t)) {
+    return "action";
+  }
+  if (/\b(can|could|please|would)\b.*\b(open|click|navigate|go\s+to|visit|type|create|delete|close|submit)\b/i.test(t)) {
+    return "action";
+  }
+
+  // Obvious guidance
+  if (/^\s*(how|where|show\s+me|guide|help\s+me|walk\s+me|explain\s+how)\b/i.test(t)) {
+    return "guidance";
+  }
+
+  // Obvious chat
+  if (/^\s*(hi|hello|hey|thanks|thank|what\s+is|who\s+is|tell\s+me\s+about|what\s+are)\b/i.test(t)) {
+    return "chat";
+  }
+
+  return "chat";
 }
