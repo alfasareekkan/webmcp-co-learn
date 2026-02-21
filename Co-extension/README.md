@@ -43,6 +43,11 @@ colearn-agent/
    - Use the popup to attach the debugger, read context, or capture screenshots
    - Interaction events (clicks, inputs, navigations) appear in the event log automatically
 
+4. **WebMCP tool discovery (optional, like [Model Context Tool Inspector](https://github.com/GoogleChromeLabs/webmcp-tools))**:
+   - Chrome **146+** with the **"WebMCP for testing"** flag enabled: `chrome://flags/#enable-webmcp-testing`
+   - After attaching the debugger, use **Scan WebMCP Tools** in the popup to list tools exposed by the page via `navigator.modelContext`
+   - The extension uses `navigator.modelContextTesting` when available to discover and execute tools (same approach as Google’s inspector)
+
 ## Architecture
 
 ```

@@ -101,10 +101,18 @@ function createBrowserTools(context) {
       onProgress({ action: "webmcp", description: description || `WebMCP: ${toolName}`, executionMode: "webmcp" });
       try {
         const result = await executeAction({ type: "webmcp_call", toolName, toolArgs: args });
-        const output = result?.result?.result;
+        // Extension returns { message, result } where result is the tool output (e.g. { content: [...] })
+        const output = result?.result;
         if (output?.content) {
           const text = output.content.map(c => c.text || JSON.stringify(c)).join("\n");
           console.log(`\x1b[36m[WebMCP] ✓ Tool "${toolName}" result:\x1b[0m ${text.slice(0, 200)}`);
+          if (toolName === "add_to_cart") {
+            if (text.startsWith("Error:")) {
+              console.log(`\x1b[33m[WebMCP][add_to_cart] ⚠ page returned error — args were: ${JSON.stringify(args)}\x1b[0m`);
+            } else {
+              console.log(`\x1b[32m[WebMCP][add_to_cart] ✓ success — args: ${JSON.stringify(args)}\x1b[0m`);
+            }
+          }
           return `WebMCP tool "${toolName}" executed. Result: ${text}`;
         }
         console.log(`\x1b[36m[WebMCP] ✓ Tool "${toolName}" done:\x1b[0m ${result?.message || "Success"}`);
@@ -406,6 +414,10 @@ function buildContextSummary(ctx) {
       return `  ${t.name} (${t.type}) — ${t.description}\n${schema}${required}`;
     }).join("\n\n");
     parts.push(`WEBMCP TOOLS (use webmcp_call_tool to call these — preferred over DOM manipulation):\n${toolList}`);
+    const hasAddToCart = ctx.webmcp.tools.some((t) => t.name === "add_to_cart");
+    if (hasAddToCart) {
+      parts.push("Important: For add_to_cart, pass the exact \"id\" from search_products (e.g. prod-002), not a product name or slug.");
+    }
   }
 
   if (ctx.elements?.length) {
@@ -507,6 +519,8 @@ export function createBrowserAgent({ model, requestContext, executeAction, onPro
     // Skip verification for read-only tools
     const readOnlyTools = new Set(["read_page", "wait_for_page", "scroll_page", "done"]);
     const prevAgent = [...state.messages].reverse().find(m => m.tool_calls?.length > 0);
+    const lastToolWasWebMCP = prevAgent?.tool_calls?.some(tc => tc.name === "webmcp_call_tool");
+
     if (prevAgent?.tool_calls?.every(tc => readOnlyTools.has(tc.name))) {
       return {};
     }
@@ -515,6 +529,13 @@ export function createBrowserAgent({ model, requestContext, executeAction, onPro
       const ctx = await requestContext();
       const newFingerprint = buildDomFingerprint(ctx);
       const unchanged = state.domFingerprint && newFingerprint === state.domFingerprint;
+
+      // WebMCP tools return success/failure in the tool result; don't force retry on DOM unchanged
+      // (e.g. checkout shows a modal or clears cart — fingerprint may not change enough)
+      if (lastToolWasWebMCP) {
+        console.log(`\x1b[34m[LangGraph] ✅ VERIFY:\x1b[0m last action was WebMCP — trusting tool result, skipping DOM retry`);
+        return { domFingerprint: newFingerprint };
+      }
 
       if (unchanged && state.retryCount < MAX_VERIFY_RETRIES) {
         console.log(`\x1b[33m[LangGraph] ✅ VERIFY:\x1b[0m DOM unchanged — retry ${state.retryCount + 1}/${MAX_VERIFY_RETRIES}`);

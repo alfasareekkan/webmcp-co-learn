@@ -1,6 +1,16 @@
 import { useEffect, useRef } from "react";
 import { products } from "../data/products";
 
+/** Convert product name to slug for fallback lookup when agent passes a name-based id. */
+function toSlug(s) {
+  if (s == null || String(s).trim() === "") return "";
+  return String(s)
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9-]/g, "");
+}
+
 export function useWebMCP(cart) {
   const cartRef = useRef(cart);
   cartRef.current = cart;
@@ -71,14 +81,14 @@ export function useWebMCP(cart) {
       {
         name: "add_to_cart",
         description:
-          "Add a product to the shopping cart. Requires the product ID and an optional quantity (defaults to 1). Use search_products first to find valid product IDs.",
+          "Add a product to the shopping cart. Use the exact 'id' value from search_products (e.g. prod-002). Optional quantity (defaults to 1).",
         inputSchema: {
           type: "object",
           properties: {
             productId: {
               type: "string",
               description:
-                'The unique product ID (e.g. "prod-001"). Use search_products to find available IDs.',
+                "The exact product id from search_products (e.g. prod-002). Required. Do not use a slug or product name; use the 'id' field from the search result.",
             },
             quantity: {
               type: "number",
@@ -88,19 +98,26 @@ export function useWebMCP(cart) {
           },
           required: ["productId"],
         },
-        execute: ({ productId, quantity = 1 }) => {
-          const product = products.find((p) => p.id === productId);
+        execute: function addToCartExecutor({ productId, quantity = 1 }) {
+          const id = productId != null ? String(productId).trim() : "";
+          console.log("[WebMCP][add_to_cart] called with", { productId, rawType: typeof productId, normalizedId: id, quantity });
+          const byId = products.find((p) => p.id === id);
+          const bySlug = id ? products.find((p) => toSlug(p.name) === toSlug(id)) : null;
+          const product = byId || bySlug;
           if (!product) {
+            console.warn("[WebMCP][add_to_cart] product not found", { id, availableIds: products.map((p) => p.id), slugTried: toSlug(id) });
             return {
               content: [
                 {
                   type: "text",
-                  text: `Error: Product "${productId}" not found. Use search_products to find valid product IDs.`,
+                  text: `Error: Product "${productId}" not found. Use search_products to find valid product IDs (e.g. prod-002) or a name slug (e.g. organic-cotton-t-shirt).`,
                 },
               ],
             };
           }
+          console.log("[WebMCP][add_to_cart] resolved product", { productId: product.id, name: product.name, matchedBy: byId ? "id" : "slug" });
           if (quantity < 1 || !Number.isInteger(quantity)) {
+            console.warn("[WebMCP][add_to_cart] invalid quantity", { quantity });
             return {
               content: [
                 {
@@ -111,6 +128,7 @@ export function useWebMCP(cart) {
             };
           }
           if (quantity > product.stock) {
+            console.warn("[WebMCP][add_to_cart] over stock", { quantity, stock: product.stock });
             return {
               content: [
                 {
@@ -121,6 +139,7 @@ export function useWebMCP(cart) {
             };
           }
           cartRef.current.addItem(product, quantity);
+          console.log("[WebMCP][add_to_cart] success - added to cart", { name: product.name, quantity, cartSize: cartRef.current.items.length });
           return {
             content: [
               {
@@ -273,8 +292,8 @@ export function useWebMCP(cart) {
             shippingMethod: {
               type: "string",
               description:
-                "Shipping speed. Use 'standard' for 5-7 business days, 'express' for 2-3 business days, or 'overnight' for next-day delivery.",
-              enum: ["standard", "express", "overnight"],
+                "Shipping speed. Use 'standard' for 5-7 business days,",
+              enum: ["standard"],
             },
           },
         },

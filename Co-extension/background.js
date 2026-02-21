@@ -580,15 +580,44 @@ function sleep(ms) {
 }
 
 // ---------------------------------------------------------------------------
-// WebMCP — Scan page for registered tools (imperative + declarative)
+// WebMCP — Scan page for registered tools (Model Context Tool Inspector style)
+// Uses navigator.modelContextTesting when available (Chrome 146+, flag enabled).
+// Falls back to hook + declarative forms when testing API is not present.
 // ---------------------------------------------------------------------------
 async function scanWebMCPTools(tabId) {
-  const expr = `(function() {
-    var result = { available: false, tools: [] };
+  const expr = `(async function() {
+    var result = { available: false, tools: [], source: 'none' };
 
-    /* Imperative tools captured by our hook */
+    /* 1) Prefer Chrome's modelContextTesting API (same as Model Context Tool Inspector) */
+    var mct = navigator.modelContextTesting;
+    function mapTool(t) {
+      return {
+        name: t.name || t.toolName || '',
+        description: t.description || '',
+        inputSchema: t.inputSchema || t.parameters || {},
+        type: 'imperative'
+      };
+    }
+    if (mct) {
+      var listFn = mct.getTools || mct.listTools;
+      if (typeof listFn === 'function') {
+        try {
+          var raw = await listFn.call(mct);
+          var list = Array.isArray(raw) ? raw : (raw && raw.tools) ? raw.tools : [];
+          if (list.length > 0) {
+            result.available = true;
+            result.source = 'modelContextTesting';
+            result.tools = list.map(mapTool);
+            return JSON.stringify(result);
+          }
+        } catch (e) { /* fall through */ }
+      }
+    }
+
+    /* 2) Fallback: imperative tools captured by our hook */
     if (window.__colearn_webmcp_tools__ && window.__colearn_webmcp_tools__.size > 0) {
       result.available = true;
+      result.source = 'hook';
       window.__colearn_webmcp_tools__.forEach(function(tool, name) {
         result.tools.push({
           name: tool.name,
@@ -599,13 +628,13 @@ async function scanWebMCPTools(tabId) {
       });
     }
 
-    /* Declarative tools from form[toolname] */
+    /* 3) Declarative tools from form[toolname] */
     var forms = document.querySelectorAll('form[toolname]');
     for (var f = 0; f < forms.length; f++) {
       var form = forms[f];
       var tname = form.getAttribute('toolname');
       var tdesc = form.getAttribute('tooldescription') || '';
-      if (result.tools.find(function(t) { return t.name === tname; })) continue;
+      if (result.tools.some(function(t) { return t.name === tname; })) continue;
       var props = {}, req = [];
       for (var e = 0; e < form.elements.length; e++) {
         var el = form.elements[e];
@@ -632,6 +661,7 @@ async function scanWebMCPTools(tabId) {
         type: 'declarative'
       });
       result.available = true;
+      if (result.source === 'none') result.source = 'declarative';
     }
 
     if (navigator.modelContext) result.available = true;
@@ -639,12 +669,20 @@ async function scanWebMCPTools(tabId) {
   })()`;
 
   try {
-    const result = await evalOnPage(tabId, expr);
+    const evalResult = await chrome.debugger.sendCommand(
+      { tabId }, "Runtime.evaluate",
+      { expression: expr, returnByValue: true, awaitPromise: true }
+    );
+    if (evalResult.exceptionDetails) {
+      console.warn("[CoLearn][WebMCP] Scan exception:", evalResult.exceptionDetails.text);
+      return { available: false, tools: [] };
+    }
+    const result = JSON.parse(evalResult.result.value);
     if (result.available) {
-      console.log(`[CoLearn][WebMCP] Scan: ${result.tools.length} tool(s) found —`,
-        result.tools.map(t => `${t.name}(${t.type})`).join(", ") || "modelContext present but empty");
+      console.log(`[CoLearn][WebMCP] Scan (${result.source}): ${result.tools.length} tool(s) —`,
+        result.tools.map(t => `${t.name}(${t.type})`).join(", ") || "empty");
     } else {
-      console.log("[CoLearn][WebMCP] Scan: not available on this page");
+      console.log("[CoLearn][WebMCP] Scan: no tools on this page");
     }
     return result;
   } catch (err) {
@@ -657,14 +695,30 @@ async function scanWebMCPTools(tabId) {
 // WebMCP — Execute a tool on the page
 // ---------------------------------------------------------------------------
 async function executeWebMCPTool(tabId, toolName, toolArgs) {
-  const argsJSON = JSON.stringify(toolArgs || {});
+  const argsObj = toolArgs || {};
+  const argsJSON = JSON.stringify(argsObj);
   const nameStr = JSON.stringify(toolName);
 
   const expr = `(async function() {
     var name = ${nameStr};
-    var args = ${argsJSON};
+    var argsJsonString = ${JSON.stringify(argsJSON)};
+    var args = (function(){ try { return JSON.parse(argsJsonString); } catch(e) { return {}; } })();
 
-    /* Try imperative tool from hook */
+    /* 1) Prefer Chrome modelContextTesting API — expects (toolName, argsAsJsonString) */
+    var mct = navigator.modelContextTesting;
+    if (mct) {
+      var callFn = mct.callTool || mct.executeTool || mct.invokeTool;
+      if (typeof callFn === 'function') {
+        try {
+          var out = await callFn.call(mct, name, argsJsonString);
+          return JSON.stringify({ ok: true, result: out || { content: [{ type: 'text', text: 'Tool executed' }] } });
+        } catch (e) {
+          return JSON.stringify({ ok: false, error: e.message });
+        }
+      }
+    }
+
+    /* 2) Fallback: imperative tool from our hook (expects object) */
     if (window.__colearn_webmcp_tools__ && window.__colearn_webmcp_tools__.has(name)) {
       var tool = window.__colearn_webmcp_tools__.get(name);
       if (tool.execute) {
@@ -677,7 +731,7 @@ async function executeWebMCPTool(tabId, toolName, toolArgs) {
       }
     }
 
-    /* Try declarative form */
+    /* 3) Declarative form (expects object) */
     var form = document.querySelector('form[toolname=\"' + name + '\"]');
     if (form) {
       var keys = Object.keys(args);
@@ -721,7 +775,13 @@ async function executeWebMCPTool(tabId, toolName, toolArgs) {
       return { ok: false, error: result.exceptionDetails.text || "Execution failed" };
     }
     const parsed = JSON.parse(result.result.value);
-    console.log(`[CoLearn][WebMCP] Tool "${toolName}" result: ok=${parsed.ok}`);
+    const resultPreview = parsed.result?.content?.[0]?.text
+      ? String(parsed.result.content[0].text).slice(0, 200)
+      : JSON.stringify(parsed.result).slice(0, 200);
+    console.log(`[CoLearn][WebMCP] Tool "${toolName}" result: ok=${parsed.ok}`, parsed.ok ? "" : `error=${parsed.error || resultPreview}`);
+    if (toolName === "add_to_cart") {
+      console.log(`[CoLearn][WebMCP] add_to_cart raw result:`, resultPreview);
+    }
     return parsed;
   } catch (err) {
     console.error(`[CoLearn][WebMCP] Tool "${toolName}" error:`, err.message);
