@@ -12,6 +12,7 @@ const state = {
   activeModels: { agent: null, guidance: null },
   sidebarOpen: true,
   chatRatio: 0.45,
+  webmcp: { available: false, tools: [], url: null },
 };
 
 /* ===== DOM refs ===== */
@@ -38,6 +39,10 @@ const modelBtn = $("modelBtn");
 const modelLabel = $("modelLabel");
 const modelDropdown = $("modelDropdown");
 const resizer = $("resizer");
+const webmcpScanBtn = $("webmcpScanBtn");
+const webmcpPanel = $("webmcpPanel");
+const webmcpStatusBar = $("webmcpStatusBar");
+const webmcpToolList = $("webmcpToolList");
 
 /* ===== WebSocket ===== */
 const WS_URL = "ws://localhost:3001?role=dashboard";
@@ -81,9 +86,15 @@ function handleMessage(data) {
       if (data.activeAgentModel || data.activeGuidanceModel) {
         state.activeModels = { agent: data.activeAgentModel, guidance: data.activeGuidanceModel };
       }
+      if (data.webmcp) state.webmcp = data.webmcp;
       renderEvents();
       renderMirror();
       renderModelSelector();
+      renderWebMCP();
+      break;
+    case "WEBMCP_UPDATE":
+      state.webmcp = data.webmcp || { available: false, tools: [] };
+      renderWebMCP();
       break;
     case "MODEL_CHANGED":
       state.activeModels = { agent: data.activeAgentModel, guidance: data.activeGuidanceModel };
@@ -124,6 +135,7 @@ function handleMessage(data) {
       const stepMsg = {
         text: data.step.description, sender: "agent-step",
         timestamp: data.timestamp, agentAction: data.step.action, isLiveStep: true,
+        executionMode: data.executionMode || "langgraph-dom",
       };
       if (idx >= 0) {
         state.chatMessages[idx] = stepMsg;
@@ -180,6 +192,7 @@ function getAppFromUrl(url) {
 const ACTION_ICONS = {
   click: "\u25B6", type: "\u2328", scroll: "\u2195",
   navigate: "\uD83C\uDF10", press_key: "\u2318", observe: "\uD83D\uDC41", wait: "\u23F3",
+  webmcp: "\u26A1",
 };
 
 const HIGHLIGHT_COLORS = ["#FF3B6F", "#00BCD4", "#FF9800", "#4CAF50", "#9C27B0", "#2196F3"];
@@ -300,9 +313,13 @@ function renderChat() {
   for (const msg of msgs) {
     if (msg.sender === "agent-step") {
       const icon = ACTION_ICONS[msg.agentAction] || "\u2699";
+      const mode = msg.executionMode || "langgraph-dom";
+      const modeLabel = mode === "webmcp" ? "WebMCP" : mode === "langgraph-nav" ? "Navigate" : "DOM";
+      const modeClass = mode === "webmcp" ? "mode-webmcp" : mode === "langgraph-nav" ? "mode-nav" : "mode-dom";
       html += `<div class="chat-bubble agent-step">
         <div class="agent-step-inner">
           <span class="agent-step-icon">${icon}</span>
+          <span class="exec-mode-badge ${modeClass}">${modeLabel}</span>
           <span class="agent-step-text">${escapeHtml(msg.text)}</span>
           <span class="agent-step-pulse"></span>
         </div>
@@ -400,6 +417,34 @@ window.toggleGuidance = function (btn) {
     btn.parentElement.appendChild(status);
   }
 };
+
+/* ===== WebMCP Panel ===== */
+function renderWebMCP() {
+  const mcp = state.webmcp;
+  if (mcp.available && mcp.tools?.length > 0) {
+    webmcpStatusBar.innerHTML = `<span class="webmcp-dot on"></span><span class="webmcp-status-text">${mcp.tools.length} tool(s) active</span>`;
+    webmcpToolList.innerHTML = mcp.tools.map((t) => `
+      <div class="webmcp-tool-item">
+        <div class="webmcp-tool-header">
+          <span class="webmcp-tool-type">${escapeHtml((t.type || "tool").toUpperCase())}</span>
+          <span class="webmcp-tool-name">${escapeHtml(t.name)}</span>
+        </div>
+        <div class="webmcp-tool-desc">${escapeHtml((t.description || "").slice(0, 100))}</div>
+      </div>
+    `).join("");
+  } else if (mcp.available) {
+    webmcpStatusBar.innerHTML = '<span class="webmcp-dot on"></span><span class="webmcp-status-text">Active (no tools)</span>';
+    webmcpToolList.innerHTML = "";
+  } else {
+    webmcpStatusBar.innerHTML = '<span class="webmcp-dot off"></span><span class="webmcp-status-text">Not detected</span>';
+    webmcpToolList.innerHTML = "";
+  }
+}
+
+webmcpScanBtn.addEventListener("click", () => {
+  wsSend({ type: "WEBMCP_SCAN" });
+  webmcpStatusBar.innerHTML = '<span class="webmcp-dot off"></span><span class="webmcp-status-text">Scanning...</span>';
+});
 
 /* ===== Model Selector ===== */
 function renderModelSelector() {

@@ -244,10 +244,21 @@
       <button id="btn-detach">Detach</button>
       <button id="btn-context">Read Context</button>
       <button id="btn-screenshot">Screenshot</button>
+      <button id="btn-webmcp" class="full" style="background: #0d9488; border-color: #0d9488; color: #fff;">Scan WebMCP Tools</button>
     </div>
     <div id="screenshot-preview">
       <img id="screenshot-img" src="" alt="screenshot" />
     </div>
+  </div>
+
+  <!-- WebMCP Tools -->
+  <div class="section" id="webmcp-section" style="display: none;">
+    <div class="section-title">WebMCP Tools</div>
+    <div id="webmcp-status" class="status-row">
+      <span class="status-label">Status</span>
+      <span class="status-value"><span class="dot off"></span>Not scanned</span>
+    </div>
+    <div id="webmcp-tools" class="event-log" style="max-height: 140px;"></div>
   </div>
 
   <!-- Event Log -->

@@ -135,5 +135,48 @@ $("#btn-screenshot").addEventListener("click", async () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// WebMCP scanning
+// ---------------------------------------------------------------------------
+
+$("#btn-webmcp").addEventListener("click", async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab) return;
+
+  const section = $("#webmcp-section");
+  const statusEl = $("#webmcp-status");
+  const toolsEl = $("#webmcp-tools");
+
+  section.style.display = "";
+  statusEl.innerHTML = '<span class="status-label">Status</span><span class="status-value">Scanning...</span>';
+  toolsEl.innerHTML = "";
+
+  const res = await chrome.runtime.sendMessage({ type: "SCAN_WEBMCP", tabId: tab.id });
+
+  if (res?.ok && res.available) {
+    statusEl.innerHTML = `<span class="status-label">Status</span><span class="status-value"><span class="dot on"></span>${res.tools.length} tool(s) found</span>`;
+
+    if (res.tools.length === 0) {
+      toolsEl.innerHTML = '<div class="empty-state">modelContext detected but no tools registered.</div>';
+    } else {
+      toolsEl.innerHTML = res.tools.map((t) => `
+        <div class="event-item" style="flex-direction: column; gap: 4px;">
+          <div style="display: flex; align-items: center; gap: 6px; width: 100%;">
+            <span class="event-type" style="background: #0d948833; color: #0d9488;">${escapeHtml(t.type || "tool").toUpperCase()}</span>
+            <strong style="font-size: 12px;">${escapeHtml(t.name)}</strong>
+          </div>
+          <div style="font-size: 11px; color: var(--text-dim); line-height: 1.4;">${escapeHtml(t.description).slice(0, 120)}</div>
+        </div>
+      `).join("");
+    }
+  } else if (res?.ok && !res.available) {
+    statusEl.innerHTML = '<span class="status-label">Status</span><span class="status-value"><span class="dot off"></span>Not available</span>';
+    toolsEl.innerHTML = '<div class="empty-state">WebMCP not detected on this page.<br>Enable chrome://flags/#enable-webmcp-testing</div>';
+  } else {
+    statusEl.innerHTML = `<span class="status-label">Status</span><span class="status-value"><span class="dot off"></span>Error</span>`;
+    toolsEl.innerHTML = `<div class="empty-state">${escapeHtml(res?.error || "Scan failed")}</div>`;
+  }
+});
+
 // Initial load
 refresh();

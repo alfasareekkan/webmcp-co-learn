@@ -11,6 +11,7 @@ import {
 } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
+import { log } from "console";
 
 const MAX_AGENT_STEPS = 20;
 
@@ -53,6 +54,10 @@ You see the current page as a list of ELEMENTS with CSS selectors, text content,
 
 ## TOOLS AVAILABLE
 
+**WebMCP tools (PREFERRED when available):**
+When the page exposes WebMCP tools (shown in the WEBMCP TOOLS section of page state), use them instead of raw DOM manipulation. WebMCP tools are structured APIs published by the website — they are more reliable and semantically correct than guessing UI interactions.
+- webmcp_call_tool(toolName, args) — execute a WebMCP tool registered on the page. Pass the tool name and a JSON object of arguments matching its inputSchema.
+
 **Interaction tools (simulate user actions):**
 - click_element(selector) — click a button, link, or any element
 - type_text(selector, text) — type text into an input/textarea
@@ -74,14 +79,15 @@ You see the current page as a list of ELEMENTS with CSS selectors, text content,
 - done(summary) — call when the task is complete
 
 ## RULES
-1. ALWAYS use the CSS "selector" field from the ELEMENTS list to target elements. Example: "#myBtn", ".search-input", "button:nth-of-type(2)"
-2. For visual changes (color, size, position, visibility), use modify_style directly — don't look for UI controls.
-3. For text changes, use set_content directly.
-4. For complex multi-step DOM changes, use execute_js with inline JavaScript.
-5. After each action, observe the result. Use read_page if needed.
-6. Use ONE tool at a time. Think step by step.
-7. Call done() when finished. Include a summary of what you did.
-8. If stuck after 3 attempts, explain the issue and call done.`;
+1. **PREFER WebMCP tools** when the page has them. They provide structured, reliable APIs — no need to guess selectors or UI structure.
+2. When no WebMCP tools are available, use CSS "selector" from the ELEMENTS list. Example: "#myBtn", ".search-input", "button:nth-of-type(2)"
+3. For visual changes (color, size, position, visibility), use modify_style directly — don't look for UI controls.
+4. For text changes, use set_content directly.
+5. For complex multi-step DOM changes, use execute_js with inline JavaScript.
+6. After each action, observe the result. Use read_page if needed.
+7. Use ONE tool at a time. Think step by step.
+8. Call done() when finished. Include a summary of what you did.
+9. If stuck after 3 attempts, explain the issue and call done.`;
 
 // ---------------------------------------------------------------------------
 // Create browser tools using CSS selectors
@@ -89,13 +95,46 @@ You see the current page as a list of ELEMENTS with CSS selectors, text content,
 function createBrowserTools(context) {
   const { executeAction, requestContext, onProgress } = context;
 
+  const webmcp_call_tool = tool(
+    async ({ toolName, args, description }) => {
+      console.log(`\x1b[36m[WebMCP] ⚡ Calling tool: "${toolName}" with args:\x1b[0m`, JSON.stringify(args));
+      onProgress({ action: "webmcp", description: description || `WebMCP: ${toolName}`, executionMode: "webmcp" });
+      try {
+        const result = await executeAction({ type: "webmcp_call", toolName, toolArgs: args });
+        const output = result?.result?.result;
+        if (output?.content) {
+          const text = output.content.map(c => c.text || JSON.stringify(c)).join("\n");
+          console.log(`\x1b[36m[WebMCP] ✓ Tool "${toolName}" result:\x1b[0m ${text.slice(0, 200)}`);
+          return `WebMCP tool "${toolName}" executed. Result: ${text}`;
+        }
+        console.log(`\x1b[36m[WebMCP] ✓ Tool "${toolName}" done:\x1b[0m ${result?.message || "Success"}`);
+        return `WebMCP tool "${toolName}" executed. ${result?.message || "Success."}`;
+      } catch (err) {
+        console.log(`\x1b[31m[WebMCP] ✗ Tool "${toolName}" failed:\x1b[0m ${err.message}`);
+        return `WebMCP tool "${toolName}" failed: ${err.message}`;
+      }
+    },
+    {
+      name: "webmcp_call_tool",
+      description: "Execute a WebMCP tool registered on the current page. Use this INSTEAD of DOM manipulation when the page provides WebMCP tools. Pass the exact tool name and arguments matching its inputSchema.",
+      schema: z.object({
+        toolName: z.string().describe("Name of the WebMCP tool to call (from WEBMCP TOOLS section)"),
+        args: z.record(z.any()).describe("Tool arguments as a JSON object matching the tool's inputSchema"),
+        description: z.string().optional().describe("What this tool call accomplishes"),
+      }),
+    }
+  );
+
   const click_element = tool(
     async ({ selector, description }) => {
-      onProgress({ action: "click", description: description || `Clicking ${selector}` });
+      console.log(`\x1b[33m[DOM] 🖱 click_element:\x1b[0m ${selector}`);
+      onProgress({ action: "click", description: description || `Clicking ${selector}`, executionMode: "langgraph-dom" });
       try {
         const result = await executeAction({ type: "click", selector });
+        console.log(`\x1b[33m[DOM] ✓ click result:\x1b[0m ${result?.message || "ok"}`);
         return `Clicked ${selector}. ${result?.message || "Success."}`;
       } catch (err) {
+        console.log(`\x1b[31m[DOM] ✗ click failed:\x1b[0m ${err.message}`);
         return `Failed to click ${selector}: ${err.message}`;
       }
     },
@@ -111,11 +150,14 @@ function createBrowserTools(context) {
 
   const type_text = tool(
     async ({ selector, text, clearFirst, description }) => {
-      onProgress({ action: "type", description: description || `Typing "${text.slice(0, 30)}"` });
+      console.log(`\x1b[33m[DOM] ⌨ type_text:\x1b[0m "${text.slice(0, 40)}" → ${selector}`);
+      onProgress({ action: "type", description: description || `Typing "${text.slice(0, 30)}"`, executionMode: "langgraph-dom" });
       try {
         const result = await executeAction({ type: "type", selector, text, clearFirst: clearFirst ?? true });
+        console.log(`\x1b[33m[DOM] ✓ type result:\x1b[0m ${result?.message || "ok"}`);
         return `Typed "${text}" into ${selector}. ${result?.message || "Success."}`;
       } catch (err) {
+        console.log(`\x1b[31m[DOM] ✗ type failed:\x1b[0m ${err.message}`);
         return `Failed to type into ${selector}: ${err.message}`;
       }
     },
@@ -133,7 +175,8 @@ function createBrowserTools(context) {
 
   const modify_style = tool(
     async ({ selector, styles, description }) => {
-      onProgress({ action: "style", description: description || `Modifying style of ${selector}` });
+      console.log(`\x1b[33m[DOM] 🎨 modify_style:\x1b[0m ${selector}`, styles);
+      onProgress({ action: "style", description: description || `Modifying style of ${selector}`, executionMode: "langgraph-dom" });
       try {
         const result = await executeAction({ type: "modify_style", selector, styles });
         return `Style updated on ${selector}. ${result?.message || "Success."}`;
@@ -176,7 +219,8 @@ function createBrowserTools(context) {
 
   const set_content = tool(
     async ({ selector, text, html, description }) => {
-      onProgress({ action: "content", description: description || `Updating content of ${selector}` });
+      console.log(`\x1b[33m[DOM] 📝 set_content:\x1b[0m ${selector}`);
+      onProgress({ action: "content", description: description || `Updating content of ${selector}`, executionMode: "langgraph-dom" });
       try {
         const result = await executeAction({ type: "set_content", selector, text, html });
         return `Content updated for ${selector}. ${result?.message || "Success."}`;
@@ -198,7 +242,8 @@ function createBrowserTools(context) {
 
   const execute_js = tool(
     async ({ code, description }) => {
-      onProgress({ action: "js", description: description || "Executing JavaScript" });
+      console.log(`\x1b[33m[DOM] 💻 execute_js:\x1b[0m ${(description || code).slice(0, 80)}`);
+      onProgress({ action: "js", description: description || "Executing JavaScript", executionMode: "langgraph-dom" });
       try {
         const result = await executeAction({ type: "execute_js", code });
         return `JavaScript executed. Result: ${result?.message || "done"}`;
@@ -238,11 +283,14 @@ function createBrowserTools(context) {
 
   const navigate_to = tool(
     async ({ url }) => {
-      onProgress({ action: "navigate", description: `Navigating to ${url}` });
+      console.log(`\x1b[35m[NAV] 🌐 navigate_to:\x1b[0m ${url}`);
+      onProgress({ action: "navigate", description: `Navigating to ${url}`, executionMode: "langgraph-nav" });
       try {
         const result = await executeAction({ type: "navigate", url });
+        console.log(`\x1b[35m[NAV] ✓ Navigated to:\x1b[0m ${url}`);
         return `Navigated to ${url}. ${result?.message || "Page loading..."}`;
       } catch (err) {
+        console.log(`\x1b[31m[NAV] ✗ Navigation failed:\x1b[0m ${err.message}`);
         return `Navigation failed: ${err.message}`;
       }
     },
@@ -318,9 +366,9 @@ function createBrowserTools(context) {
   );
 
   return [
-    click_element, type_text, modify_style, set_attribute,
-    set_content, execute_js, scroll_page, navigate_to,
-    press_key, wait_for_page, read_page, done,
+    webmcp_call_tool, click_element, type_text, modify_style,
+    set_attribute, set_content, execute_js, scroll_page,
+    navigate_to, press_key, wait_for_page, read_page, done,
   ];
 }
 
@@ -340,6 +388,24 @@ function buildContextSummary(ctx) {
       parts.push(`Headings: ${d.headings.map((h) => `${h.level}: ${h.text}`).join(" | ")}`);
     if (d.bodyText)
       parts.push(`Visible text (truncated): ${d.bodyText.slice(0, 1200)}`);
+  }
+
+  // WebMCP tools (show BEFORE elements so the agent sees them first)
+  if (ctx.webmcp?.available && ctx.webmcp.tools?.length) {
+    console.log("web mcp available ");
+    
+    const toolList = ctx.webmcp.tools.map((t) => {
+      const schema = t.inputSchema?.properties
+        ? Object.entries(t.inputSchema.properties).map(([k, v]) =>
+            `    ${k}: ${v.type || "string"}${v.enum ? ` (${v.enum.join("|")})` : ""}${v.description ? ` — ${v.description}` : ""}`
+          ).join("\n")
+        : "    (no parameters)";
+      const required = t.inputSchema?.required?.length
+        ? ` [required: ${t.inputSchema.required.join(", ")}]`
+        : "";
+      return `  ${t.name} (${t.type}) — ${t.description}\n${schema}${required}`;
+    }).join("\n\n");
+    parts.push(`WEBMCP TOOLS (use webmcp_call_tool to call these — preferred over DOM manipulation):\n${toolList}`);
   }
 
   if (ctx.elements?.length) {
@@ -382,10 +448,15 @@ export function createBrowserAgent({ model, requestContext, executeAction, onPro
   const toolNode = new ToolNode(tools);
 
   async function observeNode(state) {
+    console.log(`\x1b[34m[LangGraph] 👁 OBSERVE (step ${state.stepCount})\x1b[0m — gathering page context...`);
     try {
       const ctx = await requestContext();
       const summary = buildContextSummary(ctx);
       const fingerprint = buildDomFingerprint(ctx);
+      const webmcpInfo = ctx.webmcp?.available
+        ? `\x1b[36m WebMCP: ${ctx.webmcp.tools?.length || 0} tool(s) available\x1b[0m`
+        : ` WebMCP: not available`;
+      console.log(`\x1b[34m[LangGraph] 👁 OBSERVE done:\x1b[0m url=${ctx.url?.slice(0, 60)} | elements=${ctx.elements?.length || 0} |${webmcpInfo}`);
       return {
         messages: [new HumanMessage(
           `[PAGE STATE — Step ${state.stepCount}]\n${summary}\n\nAnalyze the page and decide your next action.`
@@ -396,6 +467,7 @@ export function createBrowserAgent({ model, requestContext, executeAction, onPro
         retryCount: 0,
       };
     } catch (err) {
+      console.log(`\x1b[31m[LangGraph] 👁 OBSERVE failed:\x1b[0m ${err.message}`);
       return {
         messages: [new HumanMessage(
           `[PAGE STATE ERROR] ${err.message}. Decide your next action based on previous state.`
@@ -406,16 +478,26 @@ export function createBrowserAgent({ model, requestContext, executeAction, onPro
   }
 
   async function agentNode(state) {
+    console.log(`\x1b[34m[LangGraph] 🤖 AGENT\x1b[0m — LLM deciding next action...`);
     const response = await modelWithTools.invoke(state.messages);
+    if (response.tool_calls?.length) {
+      const toolNames = response.tool_calls.map(tc => tc.name).join(", ");
+      const isWebMCP = response.tool_calls.some(tc => tc.name === "webmcp_call_tool");
+      const mode = isWebMCP ? "\x1b[36m[WebMCP]\x1b[0m" : "\x1b[33m[DOM/LangGraph]\x1b[0m";
+      console.log(`\x1b[34m[LangGraph] 🤖 AGENT chose:\x1b[0m ${mode} tools=[${toolNames}]`);
+    } else {
+      console.log(`\x1b[34m[LangGraph] 🤖 AGENT:\x1b[0m no tool call — text response`);
+    }
     return { messages: [response] };
   }
 
   async function toolsNode(state) {
+    console.log(`\x1b[34m[LangGraph] 🔧 TOOLS\x1b[0m — executing tool call(s)...`);
     return await toolNode.invoke(state);
   }
 
-  // Verify node — compares DOM fingerprint before vs after tool execution
   async function verifyNode(state) {
+    console.log(`\x1b[34m[LangGraph] ✅ VERIFY\x1b[0m — checking DOM changes...`);
     const lastMessage = state.messages[state.messages.length - 1];
 
     if (typeof lastMessage?.content === "string" && lastMessage.content.includes("TASK_COMPLETE")) {
@@ -435,6 +517,7 @@ export function createBrowserAgent({ model, requestContext, executeAction, onPro
       const unchanged = state.domFingerprint && newFingerprint === state.domFingerprint;
 
       if (unchanged && state.retryCount < MAX_VERIFY_RETRIES) {
+        console.log(`\x1b[33m[LangGraph] ✅ VERIFY:\x1b[0m DOM unchanged — retry ${state.retryCount + 1}/${MAX_VERIFY_RETRIES}`);
         onProgress({ action: "verify", description: "Action had no effect — retrying with alternative approach" });
         return {
           messages: [new HumanMessage(

@@ -22,6 +22,19 @@
         <h1>CoLearn</h1>
         <span class="conn-badge off" id="connBadge">Offline</span>
       </div>
+      <!-- WebMCP Section -->
+      <div class="sidebar-section-title webmcp-section-title">
+        <span>WebMCP Tools</span>
+        <button class="webmcp-scan-btn" id="webmcpScanBtn" title="Scan current page for WebMCP tools">Scan</button>
+      </div>
+      <div class="webmcp-panel" id="webmcpPanel">
+        <div class="webmcp-status-bar" id="webmcpStatusBar">
+          <span class="webmcp-dot off"></span>
+          <span class="webmcp-status-text">Not scanned</span>
+        </div>
+        <div class="webmcp-tool-list" id="webmcpToolList"></div>
+      </div>
+
       <div class="sidebar-section-title">Activity Feed</div>
       <div class="event-list" id="eventList">
         <div class="empty">Waiting for events...<br><span>Browse other tabs with the extension active</span></div>

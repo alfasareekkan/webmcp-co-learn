@@ -46,8 +46,12 @@ let latestScreenshot = null;
 
 const pendingContextRequests = new Map();
 const pendingActionRequests = new Map();
+const pendingWebMCPRequests = new Map();
 const CONTEXT_TIMEOUT = 15000;
 const ACTION_TIMEOUT = 10000;
+
+// Latest WebMCP discovery state
+let latestWebMCP = { available: false, tools: [], url: null };
 
 // Abort controller for the currently running chat operation (agent or guidance)
 let activeChatAbort = null;
@@ -122,7 +126,12 @@ function buildBrowserAgent(modelConfig) {
       requestContext: requestContextFromExtension,
       executeAction: requestActionExecution,
       onProgress: (step) => {
-        broadcast("dashboard", { type: "AGENT_STEP", step, timestamp: Date.now() });
+        broadcast("dashboard", {
+          type: "AGENT_STEP",
+          step,
+          executionMode: step.executionMode || "langgraph-dom",
+          timestamp: Date.now(),
+        });
       },
     });
   } catch (err) {
@@ -216,6 +225,13 @@ function buildContextText(context) {
       .map(([k, v]) => `${k}: ${typeof v === "number" ? Math.round(v) : v}`)
       .join(", ");
     parts.push(`Performance: ${perf}`);
+  }
+
+  if (context.webmcp?.available && context.webmcp.tools?.length) {
+    const toolSummary = context.webmcp.tools.map(t =>
+      `- ${t.name} (${t.type}): ${t.description}`
+    ).join("\n");
+    parts.push(`WebMCP Tools Available:\n${toolSummary}\nNote: This page supports WebMCP — AI agents can call these tools directly for reliable interaction.`);
   }
 
   return parts.join("\n\n");
@@ -322,6 +338,7 @@ wss.on("connection", (ws, req) => {
       providers: availableProviders,
       activeAgentModel,
       activeGuidanceModel,
+      webmcp: latestWebMCP,
     }));
   }
 
@@ -354,8 +371,52 @@ wss.on("connection", (ws, req) => {
         if (pending) {
           clearTimeout(pending.timer);
           pendingContextRequests.delete(msg.requestId);
-          if (msg.ok) pending.resolve(msg.context);
+          if (msg.ok) {
+            if (msg.context?.webmcp) {
+              const changed = JSON.stringify(latestWebMCP.tools) !== JSON.stringify(msg.context.webmcp.tools);
+              latestWebMCP = { ...msg.context.webmcp, url: msg.context.url };
+              if (changed && latestWebMCP.tools?.length > 0) {
+                console.log(`\x1b[36m[WebMCP] 🔍 Discovered ${latestWebMCP.tools.length} tool(s) on ${msg.context.url}:\x1b[0m`);
+                latestWebMCP.tools.forEach(t => console.log(`  \x1b[36m• ${t.name}\x1b[0m (${t.type}) — ${(t.description || "").slice(0, 60)}`));
+                broadcast("dashboard", {
+                  type: "WEBMCP_UPDATE",
+                  webmcp: latestWebMCP,
+                  timestamp: Date.now(),
+                });
+              } else if (changed) {
+                console.log(`\x1b[36m[WebMCP] Page: ${msg.context.url} — available: ${latestWebMCP.available}, tools: 0\x1b[0m`);
+              }
+            }
+            pending.resolve(msg.context);
+          }
           else pending.reject(new Error(msg.error || "Context gather failed"));
+        }
+        break;
+      }
+
+      case "WEBMCP_SCAN_RESULT": {
+        const pendingMcp = pendingWebMCPRequests.get(msg.requestId);
+        if (pendingMcp) {
+          clearTimeout(pendingMcp.timer);
+          pendingWebMCPRequests.delete(msg.requestId);
+          if (msg.ok) {
+            latestWebMCP = { available: msg.available, tools: msg.tools || [], url: null };
+            broadcast("dashboard", { type: "WEBMCP_UPDATE", webmcp: latestWebMCP, timestamp: Date.now() });
+            pendingMcp.resolve(latestWebMCP);
+          } else {
+            pendingMcp.reject(new Error(msg.error || "WebMCP scan failed"));
+          }
+        }
+        break;
+      }
+
+      case "WEBMCP_EXECUTE_RESULT": {
+        const pendingExec = pendingActionRequests.get(msg.requestId);
+        if (pendingExec) {
+          clearTimeout(pendingExec.timer);
+          pendingActionRequests.delete(msg.requestId);
+          if (msg.ok) pendingExec.resolve({ result: msg.result });
+          else pendingExec.reject(new Error(msg.error || "WebMCP execution failed"));
         }
         break;
       }
@@ -393,6 +454,24 @@ wss.on("connection", (ws, req) => {
 
       case "CLEAR_GUIDANCE": {
         sendToExtension({ type: "CLEAR_GUIDANCE" });
+        break;
+      }
+
+      case "WEBMCP_SCAN": {
+        console.log("webmcp");
+        
+        const reqId = `mcp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const sent = sendToExtension({ type: "WEBMCP_SCAN", requestId: reqId });
+        if (sent) {
+          const timer = setTimeout(() => pendingWebMCPRequests.delete(reqId), CONTEXT_TIMEOUT);
+          pendingWebMCPRequests.set(reqId, {
+            resolve: (r) => broadcast("dashboard", { type: "WEBMCP_UPDATE", webmcp: r, timestamp: Date.now() }),
+            reject: (e) => broadcast("dashboard", { type: "CHAT_MESSAGE", text: `WebMCP scan error: ${e.message}`, sender: "system", timestamp: Date.now() }),
+            timer,
+          });
+        } else {
+          broadcast("dashboard", { type: "CHAT_MESSAGE", text: "No extension connected for WebMCP scan.", sender: "system", timestamp: Date.now() });
+        }
         break;
       }
     }
@@ -507,23 +586,40 @@ async function handleChatMessage(text, senderWs) {
   } catch {}
 
   const intent = await classifyIntent(text, pageContext, classifierModel);
-  console.log(`[Chat] Intent: "${intent}" for: "${text.slice(0, 60)}" (url: ${pageContext?.url || "unknown"})`);
+
+  // Detailed routing log
+  const webmcpStatus = pageContext?.webmcp?.available
+    ? `\x1b[36mWebMCP: ${pageContext.webmcp.tools?.length || 0} tool(s)\x1b[0m`
+    : `WebMCP: none`;
+  const contextInfo = pageContext
+    ? `elements=${pageContext.elements?.length || 0}, screenshot=${!!pageContext.screenshot}`
+    : "no context";
+  console.log(`\x1b[32m[Chat] ━━━ ROUTING ━━━\x1b[0m`);
+  console.log(`  Message: "${text.slice(0, 80)}"`);
+  console.log(`  Intent:  \x1b[1m${intent.toUpperCase()}\x1b[0m`);
+  console.log(`  URL:     ${pageContext?.url || "unknown"}`);
+  console.log(`  Context: ${contextInfo}`);
+  console.log(`  ${webmcpStatus}`);
 
   if (abort.signal.aborted) return;
 
   switch (intent) {
     case "action":
       if (browserAgent) {
+        console.log(`\x1b[32m[Chat] → Routing to \x1b[1mLangGraph Agent\x1b[0m\x1b[32m (${activeAgentModel?.provider}/${activeAgentModel?.model})\x1b[0m`);
         await handleAgentAction(text, abort.signal);
       } else {
+        console.log(`\x1b[32m[Chat] → Agent unavailable, falling back to \x1b[1mChat mode\x1b[0m`);
         await handleNormalChat(text, pageContext, abort.signal);
       }
       break;
     case "guidance":
+      console.log(`\x1b[32m[Chat] → Routing to \x1b[1mGuidance AI\x1b[0m\x1b[32m (screenshot + context analysis)\x1b[0m`);
       await handleGuidanceChat(text, pageContext, abort.signal);
       break;
     case "chat":
     default:
+      console.log(`\x1b[32m[Chat] → Routing to \x1b[1mNormal Chat\x1b[0m`);
       await handleNormalChat(text, pageContext, abort.signal);
       break;
   }
@@ -648,6 +744,11 @@ async function handleNormalChat(text, prefetchedContext = null, signal = null) {
 // ACTION mode
 // ---------------------------------------------------------------------------
 async function handleAgentAction(text, signal = null) {
+  console.log(`\x1b[34m[Agent] ━━━ LangGraph Agent Starting ━━━\x1b[0m`);
+  console.log(`  Model: ${activeAgentModel?.provider}/${activeAgentModel?.model}`);
+  console.log(`  Task:  "${text.slice(0, 100)}"`);
+  console.log(`  WebMCP available: ${latestWebMCP.available ? `YES (${latestWebMCP.tools?.length} tools)` : "NO"}`);
+
   broadcast("dashboard", {
     type: "AGENT_STATUS", status: "running",
     message: `Agent running (${activeAgentModel?.provider}/${activeAgentModel?.model})...`,
@@ -656,6 +757,10 @@ async function handleAgentAction(text, signal = null) {
 
   try {
     const result = await runBrowserAgent(browserAgent, text, null, signal);
+
+    console.log(`\x1b[34m[Agent] ━━━ Agent Finished ━━━\x1b[0m`);
+    console.log(`  Status: ${result.status} | Steps: ${result.steps}`);
+    console.log(`  Summary: ${result.summary?.slice(0, 120)}`);
 
     if (signal?.aborted) return;
 
@@ -701,6 +806,7 @@ app.get("/api/health", (_req, res) => {
     providers: availableProviders,
     connections: { extension: clients.extension.size, dashboard: clients.dashboard.size },
     events: recentEvents.length,
+    webmcp: latestWebMCP,
   });
 });
 

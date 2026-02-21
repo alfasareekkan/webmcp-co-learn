@@ -24,6 +24,56 @@ const MAX_LOGS = 100;
 let ws = null;
 let wsReconnectTimer = null;
 
+// WebMCP hook script — injected into pages to capture tool registrations.
+// Patches navigator.modelContext methods so tool definitions (including their
+// execute functions) are stored in a global Map we can query later via CDP.
+const WEBMCP_HOOK_SCRIPT = `(function() {
+  if (window.__colearn_webmcp_hooked__) return;
+  window.__colearn_webmcp_hooked__ = true;
+  window.__colearn_webmcp_tools__ = new Map();
+
+  function hookMC(mc) {
+    if (!mc || mc.__cl_hooked__) return;
+    mc.__cl_hooked__ = true;
+
+    const origRegister = mc.registerTool?.bind(mc);
+    const origProvide  = mc.provideContext?.bind(mc);
+    const origUnreg    = mc.unregisterTool?.bind(mc);
+    const origClear    = mc.clearContext?.bind(mc);
+
+    if (origRegister) {
+      mc.registerTool = function(def) {
+        window.__colearn_webmcp_tools__.set(def.name, def);
+        return origRegister(def);
+      };
+    }
+    if (origProvide) {
+      mc.provideContext = function(ctx) {
+        window.__colearn_webmcp_tools__.clear();
+        if (ctx && ctx.tools) {
+          for (var i = 0; i < ctx.tools.length; i++)
+            window.__colearn_webmcp_tools__.set(ctx.tools[i].name, ctx.tools[i]);
+        }
+        return origProvide(ctx);
+      };
+    }
+    if (origUnreg) {
+      mc.unregisterTool = function(name) {
+        window.__colearn_webmcp_tools__.delete(name);
+        return origUnreg(name);
+      };
+    }
+    if (origClear) {
+      mc.clearContext = function() {
+        window.__colearn_webmcp_tools__.clear();
+        return origClear();
+      };
+    }
+  }
+
+  if (navigator.modelContext) hookMC(navigator.modelContext);
+})();`;
+
 // ---------------------------------------------------------------------------
 // WebSocket to backend
 // ---------------------------------------------------------------------------
@@ -124,6 +174,42 @@ async function handleBackendMessage(msg) {
       wsSend({ type: "ACTION_RESULT", requestId, ok: true, result });
     } catch (err) {
       wsSend({ type: "ACTION_RESULT", requestId, ok: false, error: err.message });
+    }
+  }
+
+  // WebMCP scan request from backend
+  if (msg.type === "WEBMCP_SCAN") {
+    const requestId = msg.requestId;
+    const tabId = state.activeTabId;
+    if (!tabId) {
+      wsSend({ type: "WEBMCP_SCAN_RESULT", requestId, ok: false, error: "No active tab" });
+      return;
+    }
+    try {
+      const attached = await ensureAttached(tabId);
+      if (!attached.ok) throw new Error(attached.error);
+      const result = await scanWebMCPTools(tabId);
+      wsSend({ type: "WEBMCP_SCAN_RESULT", requestId, ok: true, ...result });
+    } catch (err) {
+      wsSend({ type: "WEBMCP_SCAN_RESULT", requestId, ok: false, error: err.message });
+    }
+  }
+
+  // WebMCP tool execution from backend
+  if (msg.type === "WEBMCP_EXECUTE") {
+    const requestId = msg.requestId;
+    const tabId = state.activeTabId;
+    if (!tabId) {
+      wsSend({ type: "WEBMCP_EXECUTE_RESULT", requestId, ok: false, error: "No active tab" });
+      return;
+    }
+    try {
+      const attached = await ensureAttached(tabId);
+      if (!attached.ok) throw new Error(attached.error);
+      const result = await executeWebMCPTool(tabId, msg.toolName, msg.toolArgs);
+      wsSend({ type: "WEBMCP_EXECUTE_RESULT", requestId, ok: true, result: result.result });
+    } catch (err) {
+      wsSend({ type: "WEBMCP_EXECUTE_RESULT", requestId, ok: false, error: err.message });
     }
   }
 
@@ -375,6 +461,13 @@ async function executeBrowserAction(tabId, action) {
       return executeNavigation(tabId, action.url);
     }
 
+    case "webmcp_call": {
+      console.log(`[CoLearn] Action: webmcp_call → "${action.toolName}"`);
+      const result = await executeWebMCPTool(tabId, action.toolName, action.toolArgs);
+      if (!result.ok) throw new Error(result.error);
+      return { message: `WebMCP tool "${action.toolName}" executed`, result: result.result };
+    }
+
     case "press_key": {
       const keyMap = {
         Enter: { key: "Enter", code: "Enter", keyCode: 13 },
@@ -487,6 +580,156 @@ function sleep(ms) {
 }
 
 // ---------------------------------------------------------------------------
+// WebMCP — Scan page for registered tools (imperative + declarative)
+// ---------------------------------------------------------------------------
+async function scanWebMCPTools(tabId) {
+  const expr = `(function() {
+    var result = { available: false, tools: [] };
+
+    /* Imperative tools captured by our hook */
+    if (window.__colearn_webmcp_tools__ && window.__colearn_webmcp_tools__.size > 0) {
+      result.available = true;
+      window.__colearn_webmcp_tools__.forEach(function(tool, name) {
+        result.tools.push({
+          name: tool.name,
+          description: tool.description || '',
+          inputSchema: tool.inputSchema || {},
+          type: 'imperative'
+        });
+      });
+    }
+
+    /* Declarative tools from form[toolname] */
+    var forms = document.querySelectorAll('form[toolname]');
+    for (var f = 0; f < forms.length; f++) {
+      var form = forms[f];
+      var tname = form.getAttribute('toolname');
+      var tdesc = form.getAttribute('tooldescription') || '';
+      if (result.tools.find(function(t) { return t.name === tname; })) continue;
+      var props = {}, req = [];
+      for (var e = 0; e < form.elements.length; e++) {
+        var el = form.elements[e];
+        if (!el.name || el.type === 'submit') continue;
+        var pTitle = el.getAttribute('toolparamtitle') || el.name;
+        var pDesc  = el.getAttribute('toolparamdescription') || '';
+        if (!pDesc) {
+          var lbl = el.closest('label') || document.querySelector('label[for=\"' + el.id + '\"]');
+          if (lbl) pDesc = lbl.textContent.trim();
+        }
+        var prop = { type: el.type === 'number' ? 'number' : 'string' };
+        if (pDesc) prop.description = pDesc;
+        if (el.tagName === 'SELECT') {
+          prop.enum = [];
+          for (var o = 0; o < el.options.length; o++) prop.enum.push(el.options[o].value);
+        }
+        props[pTitle] = prop;
+        if (el.required) req.push(pTitle);
+      }
+      result.tools.push({
+        name: tname,
+        description: tdesc,
+        inputSchema: { type: 'object', properties: props, required: req },
+        type: 'declarative'
+      });
+      result.available = true;
+    }
+
+    if (navigator.modelContext) result.available = true;
+    return JSON.stringify(result);
+  })()`;
+
+  try {
+    const result = await evalOnPage(tabId, expr);
+    if (result.available) {
+      console.log(`[CoLearn][WebMCP] Scan: ${result.tools.length} tool(s) found —`,
+        result.tools.map(t => `${t.name}(${t.type})`).join(", ") || "modelContext present but empty");
+    } else {
+      console.log("[CoLearn][WebMCP] Scan: not available on this page");
+    }
+    return result;
+  } catch (err) {
+    console.warn("[CoLearn][WebMCP] Scan failed:", err.message);
+    return { available: false, tools: [] };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// WebMCP — Execute a tool on the page
+// ---------------------------------------------------------------------------
+async function executeWebMCPTool(tabId, toolName, toolArgs) {
+  const argsJSON = JSON.stringify(toolArgs || {});
+  const nameStr = JSON.stringify(toolName);
+
+  const expr = `(async function() {
+    var name = ${nameStr};
+    var args = ${argsJSON};
+
+    /* Try imperative tool from hook */
+    if (window.__colearn_webmcp_tools__ && window.__colearn_webmcp_tools__.has(name)) {
+      var tool = window.__colearn_webmcp_tools__.get(name);
+      if (tool.execute) {
+        try {
+          var result = await tool.execute(args);
+          return JSON.stringify({ ok: true, result: result });
+        } catch(e) {
+          return JSON.stringify({ ok: false, error: e.message });
+        }
+      }
+    }
+
+    /* Try declarative form */
+    var form = document.querySelector('form[toolname=\"' + name + '\"]');
+    if (form) {
+      var keys = Object.keys(args);
+      for (var k = 0; k < keys.length; k++) {
+        var key = keys[k];
+        var input = form.querySelector('[toolparamtitle=\"' + key + '\"]')
+                 || form.querySelector('[name=\"' + key + '\"]');
+        if (input) {
+          var nativeSetter = Object.getOwnPropertyDescriptor(
+            window.HTMLInputElement.prototype, 'value')?.set
+            || Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+          if (nativeSetter) nativeSetter.call(input, args[key]);
+          else input.value = args[key];
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }
+      var autoSubmit = form.hasAttribute('toolautosubmit');
+      if (autoSubmit) {
+        var submitBtn = form.querySelector('[type=\"submit\"]');
+        if (submitBtn) submitBtn.click();
+        else form.requestSubmit ? form.requestSubmit() : form.submit();
+      }
+      return JSON.stringify({
+        ok: true,
+        result: { content: [{ type: 'text', text: 'Form "' + name + '" ' + (autoSubmit ? 'submitted' : 'filled (manual submit required)') }] }
+      });
+    }
+
+    return JSON.stringify({ ok: false, error: 'Tool "' + name + '" not found on page' });
+  })()`
+
+  console.log(`[CoLearn][WebMCP] Executing tool: "${toolName}"`, toolArgs);
+  try {
+    const result = await chrome.debugger.sendCommand(
+      { tabId }, "Runtime.evaluate",
+      { expression: expr, returnByValue: true, awaitPromise: true }
+    );
+    if (result.exceptionDetails) {
+      console.warn(`[CoLearn][WebMCP] Tool "${toolName}" exception:`, result.exceptionDetails.text);
+      return { ok: false, error: result.exceptionDetails.text || "Execution failed" };
+    }
+    const parsed = JSON.parse(result.result.value);
+    console.log(`[CoLearn][WebMCP] Tool "${toolName}" result: ok=${parsed.ok}`);
+    return parsed;
+  } catch (err) {
+    console.error(`[CoLearn][WebMCP] Tool "${toolName}" error:`, err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Navigation — uses chrome.tabs.update so it works from ANY tab (including
 // chrome://, about:blank, new-tab pages) without needing the debugger.
 // After navigation, automatically attaches the debugger for future actions.
@@ -536,13 +779,14 @@ async function gatherFullContext(tabId) {
 
   const tab = await chrome.tabs.get(tabId);
 
-  const [screenshot, domInfo, elementsWithBounds, performanceMetrics, viewportSize] =
+  const [screenshot, domInfo, elementsWithBounds, performanceMetrics, viewportSize, webmcpResult] =
     await Promise.all([
       captureScreenshotRaw(tabId),
       extractDomInfo(tabId),
       extractInteractiveElements(tabId),
       getPerformanceMetrics(tabId),
       getViewportSize(tabId),
+      scanWebMCPTools(tabId),
     ]);
 
   return {
@@ -556,6 +800,7 @@ async function gatherFullContext(tabId) {
     consoleLogs: (state.consoleLogs[tabId] || []).slice(-30),
     networkLogs: (state.networkLogs[tabId] || []).slice(-30),
     performance: performanceMetrics,
+    webmcp: webmcpResult || { available: false, tools: [] },
     timestamp: Date.now(),
   };
 }
@@ -859,6 +1104,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case "READ_PAGE_CONTEXT":
       readPageContext(msg.tabId ?? state.activeTabId).then(sendResponse);
       return true;
+
+    case "SCAN_WEBMCP": {
+      const tid = msg.tabId ?? state.activeTabId;
+      if (!tid) { sendResponse({ ok: false, error: "No tab" }); return true; }
+      ensureAttached(tid).then(async (a) => {
+        if (!a.ok) return sendResponse({ ok: false, error: a.error });
+        try {
+          const tools = await scanWebMCPTools(tid);
+          sendResponse({ ok: true, ...tools });
+        } catch (err) {
+          sendResponse({ ok: false, error: err.message });
+        }
+      });
+      return true;
+    }
   }
 });
 
@@ -899,7 +1159,20 @@ async function attachDebugger(tabId) {
     state.debuggerAttached.add(tabId);
     state.consoleLogs[tabId] = [];
     state.networkLogs[tabId] = [];
-    console.log(`[CoLearn] Debugger attached to tab ${tabId} (all domains)`);
+
+    try {
+      await chrome.debugger.sendCommand({ tabId }, "Page.addScriptToEvaluateOnNewDocument", {
+        source: WEBMCP_HOOK_SCRIPT,
+      });
+      await chrome.debugger.sendCommand({ tabId }, "Runtime.evaluate", {
+        expression: WEBMCP_HOOK_SCRIPT, returnByValue: true,
+      });
+      console.log(`[CoLearn][WebMCP] Hook injected into tab ${tabId}`);
+    } catch (hookErr) {
+      console.warn("[CoLearn][WebMCP] Hook injection failed:", hookErr.message);
+    }
+
+    console.log(`[CoLearn] Debugger attached to tab ${tabId} (all domains + WebMCP hook)`);
     return { ok: true };
   } catch (err) {
     console.error("[CoLearn] Attach failed:", err);
