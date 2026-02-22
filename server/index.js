@@ -48,6 +48,8 @@ let latestScreenshot = null;
 const pendingContextRequests = new Map();
 const pendingActionRequests = new Map();
 const pendingWebMCPRequests = new Map();
+// P3: screenshot polling verification timers keyed by threadId
+const activePollers = new Map();
 const CONTEXT_TIMEOUT = 15000;
 const ACTION_TIMEOUT = 10000;
 
@@ -331,11 +333,11 @@ const GUIDANCE_MULTI_STEP_PROMPT = `You are a step-by-step UI guidance expert he
 User question: {{userQuestion}}
 Current page URL: {{pageUrl}}
 DOM elements with indices and bounding boxes: {{domElements}}
-
+{{appHints}}
 Analyze the screenshot and DOM, then break this task into 2-5 clear sequential steps. For each step specify:
 - A short action instruction (max 10 words)
-- Which element index to highlight
-- What signal indicates the user completed this step
+- Which element index to highlight (skip if the app renders via canvas/WebGL)
+- What signals indicate the user completed this step (provide 1-2 signals)
 
 Return ONLY valid JSON, no markdown, no explanation outside JSON:
 {
@@ -347,11 +349,18 @@ Return ONLY valid JSON, no markdown, no explanation outside JSON:
       "highlights": [
         { "elementIndex": 12, "label": "Click here", "color": "#4CAF50", "arrow": true }
       ],
-      "completionSignal": {
-        "type": "dom_appeared",
-        "description": "Insert dropdown menu is now visible",
-        "targetSelector": ""
-      }
+      "completionSignals": [
+        {
+          "type": "dom_appeared",
+          "description": "Insert dropdown menu is now visible",
+          "targetSelector": ""
+        },
+        {
+          "type": "user_clicked_target",
+          "description": "User clicked the Insert menu",
+          "targetSelector": ""
+        }
+      ]
     }
   ],
   "suggestedFollowUps": [
@@ -361,13 +370,65 @@ Return ONLY valid JSON, no markdown, no explanation outside JSON:
   ]
 }
 
-completionSignal type guide:
-- dom_appeared: a new element appeared (menu, dialog, panel, modal)
+completionSignals type guide:
+- dom_appeared: a new element appeared (menu, dialog, panel, modal) — best for Sheets/Notion menus
 - dom_disappeared: an element closed or was removed (dialog closed)
 - url_changed: the page navigated to a new URL
-- user_clicked_target: user clicked the highlighted element itself
+- user_clicked_target: user clicked the highlighted element itself — most reliable fallback
 
+Prefer 2 completionSignals per step (primary detection + user_clicked_target as fallback).
 Always return exactly 3 suggestedFollowUps relevant to what comes after this task completes.`;
+
+/**
+ * Returns app-specific prompt hints based on the current page URL.
+ * Tells the AI about each app's UI structure, DOM limitations, and best signal types.
+ */
+function getAppHints(url) {
+  if (!url) return "";
+  if (url.includes("docs.google.com/spreadsheets")) {
+    return `
+APP CONTEXT — Google Sheets:
+- Sheets renders its grid cells via canvas; most cells are NOT queryable DOM elements.
+- Top-bar menus (File, Edit, Insert, Format, Data, Tools) ARE in the DOM with role="menuitem".
+- Dialog boxes appear as overlaid divs; formula bar is a real input element.
+- Prefer "dom_appeared" for menu opens, "dom_disappeared" for dialog closes.
+- Do NOT highlight individual grid cells by elementIndex — they are canvas-rendered.
+- For cell value changes, use "user_clicked_target" on the formula bar or a toolbar button.`;
+  }
+  if (url.includes("figma.com")) {
+    return `
+APP CONTEXT — Figma:
+- Figma renders its design canvas via WebGL/WASM; layers and objects are NOT DOM elements.
+- Toolbar buttons, left/right property panels, and top menus ARE in the DOM.
+- Prefer "dom_appeared" for panel/dialog openings, "user_clicked_target" for toolbar buttons.
+- Use "url_changed" when navigating between pages or opening a different file.
+- Do NOT highlight canvas-rendered design objects by elementIndex.`;
+  }
+  if (url.includes("magicpattern.design")) {
+    return `
+APP CONTEXT — MagicPattern:
+- MagicPattern is a React-based pattern generator; most controls are real DOM elements.
+- Sliders, color pickers, dropdowns, and export buttons are all interactable.
+- Prefer "dom_appeared" for preview refreshes and new panels, "user_clicked_target" for buttons.
+- Color and slider changes trigger DOM mutations — "dom_appeared" works well as primary signal.`;
+  }
+  if (url.includes("notion.so")) {
+    return `
+APP CONTEXT — Notion:
+- Notion is a block-based editor; block content is in the DOM as contenteditable divs.
+- Slash commands open a floating menu (dom_appeared). Selecting a block type closes it (dom_disappeared).
+- Page navigation changes the URL (url_changed). Toolbar buttons respond to user_clicked_target.`;
+  }
+  if (url.includes("miro.com")) {
+    return `
+APP CONTEXT — Miro:
+- Miro renders its board canvas via SVG/canvas; board objects are NOT real DOM elements.
+- Toolbar buttons, panel controls, and context menus ARE in the DOM.
+- Prefer "user_clicked_target" for toolbar actions, "dom_appeared" for modals and side panels.
+- Do NOT highlight canvas board objects by elementIndex.`;
+  }
+  return "";
+}
 
 function buildDomElementsForPrompt(context) {
   if (!context.elements?.length) return "(No elements provided)";
@@ -409,13 +470,22 @@ function parseGuidanceResponse(raw) {
         color: /^#[0-9A-Fa-f]{6}$/.test(h.color) ? h.color : "#4CAF50",
         arrow: Boolean(h.arrow),
       })),
-      completionSignal: {
-        type: ["dom_appeared", "dom_disappeared", "url_changed", "user_clicked_target"].includes(s.completionSignal?.type)
-          ? s.completionSignal.type
-          : "user_clicked_target",
-        description: String(s.completionSignal?.description || "").slice(0, 200) || "Step completed",
-        targetSelector: String(s.completionSignal?.targetSelector || ""),
-      },
+      completionSignals: (() => {
+        const VALID = ["dom_appeared", "dom_disappeared", "url_changed", "user_clicked_target"];
+        const normalize = (cs) => ({
+          type: VALID.includes(cs?.type) ? cs.type : "user_clicked_target",
+          description: String(cs?.description || "").slice(0, 200) || "Step completed",
+          targetSelector: String(cs?.targetSelector || ""),
+        });
+        // Prefer new completionSignals array; fall back to singular completionSignal
+        if (Array.isArray(s.completionSignals) && s.completionSignals.length > 0) {
+          return s.completionSignals.map(normalize);
+        }
+        if (s.completionSignal) return [normalize(s.completionSignal)];
+        return [{ type: "user_clicked_target", description: "Step completed", targetSelector: "" }];
+      })(),
+      // Keep single-signal alias for backwards compat
+      get completionSignal() { return this.completionSignals[0]; },
     }));
     return {
       taskSummary: String(parsed.taskSummary || "Complete the task").slice(0, 300),
@@ -445,11 +515,8 @@ function parseGuidanceResponse(raw) {
       color: HIGHLIGHT_COLORS[i % HIGHLIGHT_COLORS.length],
       arrow: true,
     })),
-    completionSignal: {
-      type: "user_clicked_target",
-      description: "User clicked the highlighted element",
-      targetSelector: "",
-    },
+    completionSignals: [{ type: "user_clicked_target", description: "User clicked the highlighted element", targetSelector: "" }],
+    get completionSignal() { return this.completionSignals[0]; },
   };
   return {
     taskSummary: text.slice(0, 300) || "Complete the task",
@@ -477,7 +544,8 @@ async function askAIMultiStepPlan(userMessage, context) {
   const domElements = buildDomElementsForPrompt(context);
   const prompt = GUIDANCE_MULTI_STEP_PROMPT.replace("{{userQuestion}}", userMessage)
     .replace("{{pageUrl}}", pageUrl)
-    .replace("{{domElements}}", domElements);
+    .replace("{{domElements}}", domElements)
+    .replace("{{appHints}}", getAppHints(pageUrl));
 
   const contentParts = [];
   if (context?.screenshot) {
@@ -518,7 +586,7 @@ async function askAIMultiStepPlan(userMessage, context) {
           stepNumber: 1,
           instruction: "Follow the guidance above",
           highlights: [],
-          completionSignal: { type: "user_clicked_target", description: "User acknowledged", targetSelector: "" },
+          completionSignals: [{ type: "user_clicked_target", description: "User acknowledged", targetSelector: "" }],
         }],
         suggestedFollowUps: [],
       };
@@ -655,6 +723,35 @@ wss.on("connection", (ws, req) => {
 
       case "STEP_ABANDONED": {
         handleStepAbandoned(msg);
+        break;
+      }
+
+      // P5: User responded to "Did you complete this step?" prompt
+      case "STEP_CONFIRM_YES": {
+        const tid = msg.threadId || "default";
+        const session = sessionManager.getSession(tid);
+        if (session) {
+          const step = sessionManager.getCurrentStep(tid);
+          console.log(`[STEP] User confirmed step ${step?.stepNumber} complete — advancing`);
+          handleStepCompleted({ threadId: tid, sessionId: session.sessionId, stepNumber: step?.stepNumber, fromConfirm: true });
+        }
+        break;
+      }
+
+      case "STEP_CONFIRM_NO": {
+        const tid = msg.threadId || "default";
+        const session = sessionManager.getSession(tid);
+        if (session) {
+          console.log(`[STEP] User said step not done — restarting watcher`);
+          sessionManager.setActive(tid);
+          showCurrentStep(tid);
+          broadcast("dashboard", {
+            type: "CHAT_MESSAGE",
+            text: "No problem — keep going! I'm watching for when you complete it.",
+            sender: "system",
+            timestamp: Date.now(),
+          });
+        }
         break;
       }
 
@@ -844,7 +941,28 @@ async function showCurrentStep(threadId) {
   const session = sessionManager.getSession(threadId);
   const step = sessionManager.getCurrentStep(threadId);
   if (!session || !step) return;
-  const context = sessionContextMap.get(threadId);
+
+  // P2: Always gather fresh context before showing each step so highlights are accurate.
+  let context = sessionContextMap.get(threadId); // start with cached as fallback
+  try {
+    const fresh = await Promise.race([
+      requestContextFromExtension(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 5000)),
+    ]);
+    if (fresh) {
+      context = fresh;
+      sessionContextMap.set(threadId, fresh);
+      if (fresh.screenshot) {
+        latestScreenshot = { dataUrl: fresh.screenshot, url: fresh.url, timestamp: Date.now() };
+      }
+    }
+  } catch (err) {
+    console.log(`[STEP] Fresh context unavailable (${err.message}) — using cached`);
+  }
+
+  // Reset the _completing flag so the new step can be completed
+  if (session._completing) session._completing = false;
+
   const totalSteps = session.steps.length;
   const stepNumber = step.stepNumber;
 
@@ -911,23 +1029,90 @@ async function showCurrentStep(threadId) {
     taskSummary: session.taskSummary,
   });
   const selectorFromHighlight = guidanceData[0]?.selector || "";
+
+  // P4: Send all completion signals so the watcher can race them (OR logic).
+  const signals = (step.completionSignals || [step.completionSignal]).map((sig) => ({
+    ...sig,
+    targetSelector: sig.targetSelector || selectorFromHighlight || "",
+  }));
   sendToExtension({
     type: "WATCH_FOR_COMPLETION",
     threadId,
     sessionId: session.sessionId,
     stepNumber,
-    signal: {
-      ...(step.completionSignal || { type: "user_clicked_target", description: "", targetSelector: "" }),
-      targetSelector: (step.completionSignal?.targetSelector || selectorFromHighlight) || "",
-    },
+    signals,
   });
 
   sessionManager.setWaitingForStep(threadId);
+
+  // P3: Start screenshot-polling as an additional completion detector.
+  startPollingVerification(threadId, step);
+}
+
+// ---------------------------------------------------------------------------
+// P3: Screenshot polling verification — catches completions DOM watchers miss
+// ---------------------------------------------------------------------------
+function stopPollingVerification(threadId) {
+  const id = activePollers.get(threadId);
+  if (id) {
+    clearInterval(id);
+    activePollers.delete(threadId);
+  }
+}
+
+function startPollingVerification(threadId, step) {
+  stopPollingVerification(threadId); // clear any previous poller for this thread
+
+  // Only poll on signals where screenshot can help (not user_clicked_target — the watcher handles that)
+  const primaryType = step.completionSignals?.[0]?.type || step.completionSignal?.type || "user_clicked_target";
+  if (primaryType === "user_clicked_target") return; // watcher is sufficient
+
+  const POLL_INTERVAL_MS = 4000;
+  const intervalId = setInterval(async () => {
+    const session = sessionManager.getSession(threadId);
+    if (!session || session.status !== "waiting_for_step" || session._completing) {
+      stopPollingVerification(threadId);
+      return;
+    }
+    const currentStep = sessionManager.getCurrentStep(threadId);
+    if (!currentStep || String(currentStep.stepNumber) !== String(step.stepNumber)) {
+      stopPollingVerification(threadId);
+      return;
+    }
+
+    let freshContext = null;
+    try {
+      freshContext = await Promise.race([
+        requestContextFromExtension(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 3500)),
+      ]);
+    } catch { return; } // silent — try again next interval
+
+    const { verified } = await verifyStepWithScreenshot(
+      step.instruction,
+      (step.completionSignals?.[0] || step.completionSignal)?.description || "Step completed",
+      freshContext
+    );
+
+    if (verified) {
+      console.log(`[POLL] Screenshot confirms step ${step.stepNumber} complete — advancing`);
+      stopPollingVerification(threadId);
+      handleStepCompleted({
+        threadId,
+        sessionId: session.sessionId,
+        stepNumber: step.stepNumber,
+        fromPoller: true,
+      });
+    }
+  }, POLL_INTERVAL_MS);
+
+  activePollers.set(threadId, intervalId);
+  console.log(`[POLL] Started screenshot polling for step ${step.stepNumber} (interval: ${POLL_INTERVAL_MS}ms)`);
 }
 
 async function handleStepCompleted(msg) {
   const { threadId, sessionId, stepNumber } = msg;
-  console.log(`[WATCHER] STEP_COMPLETED`, { threadId, sessionId, stepNumber });
+  console.log(`[WATCHER] STEP_COMPLETED`, { threadId, sessionId, stepNumber, fromPoller: msg.fromPoller || false });
 
   const session = sessionManager.getSession(threadId);
   const currentStep = sessionManager.getCurrentStep(threadId);
@@ -935,6 +1120,16 @@ async function handleStepCompleted(msg) {
     console.log("[STEP] Ignoring STEP_COMPLETED — session or step mismatch");
     return;
   }
+
+  // Guard against concurrent completion signals (DOM watcher + poller firing at the same time)
+  if (session._completing) {
+    console.log("[STEP] Ignoring duplicate STEP_COMPLETED signal");
+    return;
+  }
+  session._completing = true;
+
+  // Stop any active poller — we're handling completion now
+  stopPollingVerification(threadId);
 
   // Immediate feedback so the user sees the system reacted
   broadcast("dashboard", {
@@ -968,18 +1163,18 @@ async function handleStepCompleted(msg) {
   );
 
   if (!verified) {
-    // Increment a retry counter to avoid an infinite re-show loop on a bad screenshot.
     session._verifyRetries = (session._verifyRetries || 0) + 1;
     if (session._verifyRetries <= 2) {
       console.log(`[STEP] Screenshot says not done yet (retry ${session._verifyRetries}/2) — re-watching`);
+      session._completing = false; // allow next completion signal through
       sessionManager.setActive(threadId);
-      showCurrentStep(threadId);
+      showCurrentStep(threadId); // showCurrentStep resets _completing too
       return;
     }
-    // After 2 retries trust the watcher anyway — never block the user permanently.
     console.log("[STEP] Max retries reached — advancing despite screenshot disagreement");
   }
 
+  session._completing = false;
   session._verifyRetries = 0;
   console.log(`[STEP] Advancing from step ${stepNumber}`);
 
@@ -1001,21 +1196,36 @@ async function handleStepCompleted(msg) {
 function handleStepAbandoned(msg) {
   const { threadId, reason } = msg;
   console.log(`[WATCHER] STEP_ABANDONED`, { threadId, reason });
+
+  const isTimeout = reason && String(reason).toLowerCase().includes("timeout");
+
+  // On timeout: P5 — show "Did you complete this step?" confirm instead of silently restarting.
+  if (isTimeout) {
+    const session = sessionManager.getSession(threadId);
+    if (session && session.status !== "complete" && session.status !== "abandoned") {
+      stopPollingVerification(threadId);
+      const currentStep = sessionManager.getCurrentStep(threadId);
+      console.log(`[STEP] Timeout — prompting user for step confirm (step ${currentStep?.stepNumber})`);
+      // Keep session alive while we wait for the user to respond
+      sessionManager.setActive(threadId);
+      broadcast("dashboard", {
+        type: "STEP_CONFIRM",
+        threadId,
+        stepNumber: currentStep?.stepNumber,
+        instruction: currentStep?.instruction,
+      });
+      return;
+    }
+  }
+
+  // Explicit abandon (Tab unreachable, user cancelled, etc.) — end the session.
+  stopPollingVerification(threadId);
   sessionManager.abandonSession(threadId);
   sendToExtension({ type: "CLEAR_GUIDANCE" });
   broadcast("dashboard", {
     type: "GUIDANCE_ABANDONED",
     reason: reason || "Guidance stopped",
   });
-  const isTimeout = reason && String(reason).toLowerCase().includes("timeout");
-  if (isTimeout) {
-    broadcast("dashboard", {
-      type: "CHAT_MESSAGE",
-      text: "Still need help with this step? Type **yes** to retry.",
-      sender: "system",
-      timestamp: Date.now(),
-    });
-  }
 }
 
 // ---------------------------------------------------------------------------

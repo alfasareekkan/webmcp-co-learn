@@ -498,6 +498,69 @@
   line-height: 1.4;
 }
 
+/* --- P5: Step confirm Yes/No bubble --- */
+.chat-bubble.step-confirm {
+  align-self: flex-start;
+  background: rgba(255, 193, 7, 0.06);
+  border: 1px solid rgba(255, 193, 7, 0.3);
+  border-radius: 10px;
+  padding: 12px 14px;
+  max-width: 320px;
+  animation: fadeIn 0.2s ease;
+}
+
+.step-confirm-question {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary, #e0e0e0);
+  margin-bottom: 10px;
+  line-height: 1.4;
+}
+
+.step-confirm-instruction {
+  font-weight: 400;
+  color: var(--text-secondary, #a0a0a0);
+  font-size: 12px;
+}
+
+.step-confirm-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.step-confirm-btn {
+  flex: 1;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: none;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.step-confirm-btn:hover { opacity: 0.85; }
+
+.step-confirm-btn.yes {
+  background: rgba(76, 175, 80, 0.18);
+  color: #4CAF50;
+  border: 1px solid rgba(76, 175, 80, 0.35);
+}
+
+.step-confirm-btn.no {
+  background: rgba(255, 82, 82, 0.12);
+  color: #ff5252;
+  border: 1px solid rgba(255, 82, 82, 0.28);
+}
+
+.chat-bubble.step-confirm-done {
+  align-self: flex-start;
+  font-size: 12px;
+  color: var(--text-secondary, #a0a0a0);
+  padding: 4px 10px;
+  animation: fadeIn 0.2s ease;
+}
+
 /* --- Completed step checkmark --- */
 .chat-bubble.step-done {
   align-self: flex-start;

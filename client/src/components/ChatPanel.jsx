@@ -154,6 +154,28 @@ function GuidanceActions({ guidance, wsSend }) {
   );
 }
 
+function StepConfirmBubble({ msg, onYes, onNo }) {
+  if (msg.confirmed) {
+    return <div className="chat-bubble system step-confirm-done">Noted — continuing guidance.</div>;
+  }
+  return (
+    <div className="chat-bubble system step-confirm">
+      <div className="step-confirm-question">
+        Did you complete step {msg.stepNumber}?
+        {msg.instruction && <span className="step-confirm-instruction"> — {msg.instruction}</span>}
+      </div>
+      <div className="step-confirm-actions">
+        <button className="step-confirm-btn yes" onClick={() => onYes(msg.threadId)}>
+          ✓ Yes, done
+        </button>
+        <button className="step-confirm-btn no" onClick={() => onNo(msg.threadId)}>
+          ✗ Not yet
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function TaskSummaryCard({ summary }) {
   if (!summary) return null;
   return (
@@ -238,7 +260,7 @@ function ModelSelector({ providers, activeModels, wsSend }) {
   );
 }
 
-export default function ChatPanel({ messages, onSend, onStop, connected, aiThinking, agentStatus, providers, activeModels, wsSend, guidanceSuggestions = [], taskSummary = null }) {
+export default function ChatPanel({ messages, onSend, onStop, connected, aiThinking, agentStatus, providers, activeModels, wsSend, guidanceSuggestions = [], taskSummary = null, onConfirmStepYes, onConfirmStepNo }) {
   const [input, setInput] = useState("");
   const bottomRef = useRef(null);
 
@@ -293,6 +315,16 @@ export default function ChatPanel({ messages, onSend, onStop, connected, aiThink
         )}
 
         {messages.map((msg, i) => {
+          if (msg.isStepConfirm) {
+            return (
+              <StepConfirmBubble
+                key={i}
+                msg={msg}
+                onYes={onConfirmStepYes || (() => {})}
+                onNo={onConfirmStepNo || (() => {})}
+              />
+            );
+          }
           if (msg.isStepProgress) {
             if (msg.isStepCompleted) {
               return (

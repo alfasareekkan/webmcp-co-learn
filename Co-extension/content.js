@@ -119,29 +119,35 @@
     };
   }
 
-  const WATCHER_TIMEOUT_MS = 60000;
+  const WATCHER_TIMEOUT_MS = 300000; // 5 minutes
 
   function runWatcher(config) {
-    const { threadId, sessionId, stepNumber, signal } = config;
-    const type = signal?.type || "user_clicked_target";
-    const targetSelector = signal?.targetSelector || "";
+    const { threadId, sessionId, stepNumber } = config;
+    // P4: support multiple signals (OR logic) — fall back to single signal or default
+    const signals = config.signals
+      || (config.signal ? [config.signal] : [{ type: "user_clicked_target", targetSelector: "" }]);
 
     return new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanups = [];
+
       const timeoutId = setTimeout(() => {
-        cleanup();
-        console.warn("[CoLearn] [WATCHER] Timeout after 60s");
-        reject({ type: "STEP_ABANDONED", threadId, sessionId, reason: "Step timed out (60s)" });
+        if (settled) return;
+        settled = true;
+        runCleanup();
+        console.warn("[CoLearn] [WATCHER] Timeout after 5 minutes");
+        reject({ type: "STEP_ABANDONED", threadId, sessionId, reason: "Step timed out (5 min)" });
       }, WATCHER_TIMEOUT_MS);
 
-      function cleanup() {
+      function runCleanup() {
         clearTimeout(timeoutId);
-        if (observer) observer.disconnect();
-        if (urlInterval) clearInterval(urlInterval);
-        if (clickTarget && clickTarget.removeEventListener) clickTarget.removeEventListener("click", onTargetClick);
+        cleanups.forEach((fn) => { try { fn(); } catch {} });
       }
 
       function done(domSnapshot) {
-        cleanup();
+        if (settled) return;
+        settled = true;
+        runCleanup();
         resolve({
           type: "STEP_COMPLETED",
           threadId,
@@ -151,59 +157,60 @@
         });
       }
 
-      let observer;
-      let urlInterval;
-      let clickTarget;
-      let onTargetClick;
+      // Set up a watcher for each signal — first to fire wins (OR logic)
+      for (const signal of signals) {
+        const type = signal.type || "user_clicked_target";
+        const targetSelector = signal.targetSelector || "";
 
-      if (type === "dom_appeared") {
-        const prevCount = document.body ? document.body.getElementsByTagName("*").length : 0;
-        let debounceTimer = null;
-        observer = new MutationObserver(() => {
-          clearTimeout(debounceTimer);
-          debounceTimer = setTimeout(() => {
-            const nextCount = document.body ? document.body.getElementsByTagName("*").length : 0;
-            if (nextCount > prevCount + 8) {
-              done({ elementCount: nextCount });
-            }
-          }, 300);
-        });
-        observer.observe(document.body || document.documentElement, { childList: true, subtree: true });
-      } else if (type === "dom_disappeared") {
-        const prevCount = document.body ? document.body.getElementsByTagName("*").length : 0;
-        let debounceTimer = null;
-        observer = new MutationObserver(() => {
-          clearTimeout(debounceTimer);
-          debounceTimer = setTimeout(() => {
-            const nextCount = document.body ? document.body.getElementsByTagName("*").length : 0;
-            if (nextCount < prevCount - 8) {
-              done({ elementCount: nextCount });
-            }
-          }, 300);
-        });
-        observer.observe(document.body || document.documentElement, { childList: true, subtree: true });
-      } else if (type === "url_changed") {
-        const baseline = location.href;
-        urlInterval = setInterval(() => {
-          if (location.href !== baseline) {
-            done({ url: location.href });
-          }
-        }, 500);
-      } else {
-        const el = targetSelector
-          ? document.querySelector(targetSelector)
-          : document.querySelector(".__colearn_highlight");
-        if (el) {
-          clickTarget = el;
-          onTargetClick = () => done({ clicked: true });
-          el.addEventListener("click", onTargetClick, { once: true });
+        if (type === "dom_appeared") {
+          const prevCount = document.body ? document.body.getElementsByTagName("*").length : 0;
+          let debounceTimer = null;
+          const obs = new MutationObserver(() => {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+              const nextCount = document.body ? document.body.getElementsByTagName("*").length : 0;
+              if (nextCount > prevCount + 8) done({ elementCount: nextCount });
+            }, 300);
+          });
+          obs.observe(document.body || document.documentElement, { childList: true, subtree: true });
+          cleanups.push(() => { clearTimeout(debounceTimer); obs.disconnect(); });
+
+        } else if (type === "dom_disappeared") {
+          const prevCount = document.body ? document.body.getElementsByTagName("*").length : 0;
+          let debounceTimer = null;
+          const obs = new MutationObserver(() => {
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+              const nextCount = document.body ? document.body.getElementsByTagName("*").length : 0;
+              if (nextCount < prevCount - 8) done({ elementCount: nextCount });
+            }, 300);
+          });
+          obs.observe(document.body || document.documentElement, { childList: true, subtree: true });
+          cleanups.push(() => { clearTimeout(debounceTimer); obs.disconnect(); });
+
+        } else if (type === "url_changed") {
+          const baseline = location.href;
+          const urlInterval = setInterval(() => {
+            if (location.href !== baseline) done({ url: location.href });
+          }, 500);
+          cleanups.push(() => clearInterval(urlInterval));
+
         } else {
-          document.body.addEventListener("click", function oneClick(e) {
-            if (e.target.closest && e.target.closest(".__colearn_highlight")) {
-              document.body.removeEventListener("click", oneClick);
-              done({ clicked: true });
-            }
-          }, { once: true });
+          // user_clicked_target (default)
+          const el = targetSelector
+            ? document.querySelector(targetSelector)
+            : document.querySelector(".__colearn_highlight");
+          if (el) {
+            const onTargetClick = () => done({ clicked: true });
+            el.addEventListener("click", onTargetClick, { once: true });
+            cleanups.push(() => el.removeEventListener("click", onTargetClick));
+          } else {
+            const oneClick = (e) => {
+              if (e.target.closest && e.target.closest(".__colearn_highlight")) done({ clicked: true });
+            };
+            document.body.addEventListener("click", oneClick);
+            cleanups.push(() => document.body.removeEventListener("click", oneClick));
+          }
         }
       }
     });

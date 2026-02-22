@@ -144,6 +144,20 @@ export default function App() {
           { text: "⚠️ " + (data.reason || "Guidance stopped"), sender: "system", timestamp: Date.now() },
         ]);
         break;
+
+      // P5: Show "Did you complete this step?" Yes/No prompt
+      case "STEP_CONFIRM":
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            isStepConfirm: true,
+            threadId: data.threadId,
+            stepNumber: data.stepNumber,
+            instruction: data.instruction,
+            timestamp: Date.now(),
+          },
+        ]);
+        break;
     }
   }, []);
 
@@ -151,6 +165,22 @@ export default function App() {
 
   const sendChat = (text) => {
     send({ type: "CHAT_MESSAGE", text });
+  };
+
+  // P5: Step confirm Yes/No handlers
+  const confirmStepYes = (threadId) => {
+    send({ type: "STEP_CONFIRM_YES", threadId });
+    // Dismiss the confirm bubble
+    setChatMessages((prev) =>
+      prev.map((m) => (m.isStepConfirm && m.threadId === threadId ? { ...m, confirmed: true } : m))
+    );
+  };
+
+  const confirmStepNo = (threadId) => {
+    send({ type: "STEP_CONFIRM_NO", threadId });
+    setChatMessages((prev) =>
+      prev.map((m) => (m.isStepConfirm && m.threadId === threadId ? { ...m, confirmed: true } : m))
+    );
   };
 
   const stopChat = () => {
@@ -225,6 +255,8 @@ export default function App() {
           wsSend={send}
           guidanceSuggestions={guidanceSuggestions}
           taskSummary={guidanceSession.taskSummary}
+          onConfirmStepYes={confirmStepYes}
+          onConfirmStepNo={confirmStepNo}
         />
       </main>
     </div>

@@ -158,6 +158,7 @@ co-learn-3/
 │   ├── agent.js                  # LangGraph browser agent — ReAct loop, tools, intent classifier
 │   ├── models.js                 # Multi-model factory — Gemini, Claude, OpenAI via LangChain
 │   ├── annotate.js               # Screenshot annotation engine (sharp + SVG)
+│   ├── guidanceSessionManager.js # Multi-step guidance sessions — createSession, advanceStep, completion signals
 │   ├── package.json              # Dependencies
 │   ├── .env                      # Environment variables (API keys) — gitignored
 │   └── .env.example              # Template for .env
@@ -304,6 +305,7 @@ The extension detects `chrome://`, `about:`, `devtools://`, and other restricted
 - Clients tracked by role (`extension` or `dashboard`)
 - Events stored in a ring buffer (500 max)
 - Pending context and action requests tracked with timeouts
+- Multi-step guidance sessions managed by `guidanceSessionManager.js` (createSession, advanceStep, completion watchers)
 
 **WebSocket message types handled**:
 
@@ -313,6 +315,7 @@ The extension detects `chrome://`, `about:`, `devtools://`, and other restricted
 | Extension | `SCREENSHOT` | Store latest + broadcast |
 | Extension | `CONTEXT_RESPONSE` | Resolve pending context request |
 | Extension | `ACTION_RESULT` | Resolve pending action request |
+| Extension | `STEP_COMPLETED`, `STEP_ABANDONED` | Update guidance session (advance step or abandon) |
 | Dashboard | `CHAT_MESSAGE` | LLM classifies intent → action, guidance, or chat pipeline |
 | Dashboard | `SET_MODEL` | Switch active AI model at runtime |
 | Dashboard | `SHOW_GUIDANCE` | Relay to extension for on-page overlay |
@@ -993,6 +996,8 @@ cd desktop && npx electron .
 | `SCREENSHOT` | `{ dataUrl, tabId, url }` | Manual screenshot capture |
 | `CONTEXT_RESPONSE` | `{ requestId, ok, context }` | Response to GATHER_CONTEXT |
 | `ACTION_RESULT` | `{ requestId, ok, result }` | Response to EXECUTE_ACTION |
+| `STEP_COMPLETED` | `{ threadId, sessionId, stepNumber }` | User completed a guidance step (watcher) |
+| `STEP_ABANDONED` | `{ threadId, reason? }` | Guidance step timed out or was abandoned |
 
 #### Server → Extension
 
@@ -1002,6 +1007,8 @@ cd desktop && npx electron .
 | `EXECUTE_ACTION` | `{ requestId, action }` | Execute a browser action (click, type, etc.) |
 | `SHOW_GUIDANCE` | `{ guides[] }` | Render on-page guidance overlay |
 | `CLEAR_GUIDANCE` | — | Remove on-page overlay |
+| `STEP_GUIDANCE` | `{ guides[], stepIndex, stepCount }` | Step-by-step overlay data for current step |
+| `WATCH_FOR_COMPLETION` | `{ threadId, sessionId, stepNumber, signal }` | Content script watches for completion (dom_appeared, dom_disappeared, url_changed, user_clicked_target) |
 
 #### Server → Dashboard
 
@@ -1015,6 +1022,10 @@ cd desktop && npx electron .
 | `AGENT_STATUS` | `{ status, message? }` | Agent running/idle state |
 | `AGENT_STEP` | `{ step: { action, description } }` | Live agent action step |
 | `MODEL_CHANGED` | `{ activeAgentModel, activeGuidanceModel }` | Confirmation of model switch |
+| `GUIDANCE_SESSION_START` | `{ threadId, taskSummary, stepCount, suggestedFollowUps? }` | Multi-step guidance session started |
+| `STEP_PROGRESS` | `{ threadId, stepIndex, stepCount, instruction, image? }` | Current step update (e.g. "Step 2 of 4") |
+| `TASK_COMPLETE` | `{ threadId, message, suggestedFollowUps? }` | Multi-step task finished; optional follow-up chips |
+| `GUIDANCE_ABANDONED` | `{ threadId, reason? }` | Session abandoned (e.g. new guidance question) |
 
 #### Dashboard → Server
 
@@ -1161,15 +1172,23 @@ cd desktop && npx electron .
   - "Show on Page" guidance button triggers on-page overlay from desktop
   - WebSocket connection to the same backend
 
-### Phase 4 (Future) — Context Understanding & Advanced Guidance
+### Phase 4 (Complete) — Multi-Step Guidance Sessions
+
+- [x] **Multi-step task guidance** ("How do I create a design in Figma?"-style flows)
+  - Gemini produces a plan: `taskSummary`, `steps[]` (instruction, highlights, completionSignal), `suggestedFollowUps[]`
+  - `guidanceSessionManager.js` tracks sessions by threadId: createSession, advanceStep, completeSession, abandonSession
+  - Per-step annotated screenshots, overlay highlights, and completion watchers (dom_appeared, dom_disappeared, url_changed, user_clicked_target)
+  - Dashboard shows step progress, task complete message, and clickable suggestion chips for follow-ups
+  - New WebSocket types: GUIDANCE_SESSION_START, STEP_PROGRESS, TASK_COMPLETE, GUIDANCE_ABANDONED; WATCH_FOR_COMPLETION (server → extension); STEP_COMPLETED, STEP_ABANDONED (extension → server)
+
+### Phase 5 (Future) — Context Understanding & Advanced Guidance
 
 - [ ] Persistent conversation history
-- [ ] Multi-step task guidance ("How do I create a design in Figma?")
 - [ ] Auto-detect user intent from interaction patterns
 - [ ] Proactive suggestions (detect confusion, repeated actions)
 - [ ] Cross-tab context awareness
 
-### Phase 5 (Future) — Advanced Automation & Collaboration
+### Phase 6 (Future) — Advanced Automation & Collaboration
 
 - [ ] Task recording and playback
 - [ ] Cross-app workflow automation
@@ -1179,4 +1198,4 @@ cd desktop && npx electron .
 
 ---
 
-*Generated from the co-learn-3 codebase. Last updated: February 20, 2026.*
+*Generated from the co-learn-3 codebase. Last updated: February 22, 2026.*
