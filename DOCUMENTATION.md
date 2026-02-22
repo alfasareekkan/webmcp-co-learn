@@ -122,6 +122,20 @@
 
 Intent is classified by the **LLM itself** (`classifyIntent()` in `agent.js`). The guidance model receives the user message and current page URL, then returns one of: `ACTION`, `GUIDANCE`, or `CHAT`. A lightweight regex-based fallback is used if the LLM call fails.
 
+### Multi-step guidance flow
+
+When the user asks a guidance-style question (e.g. "How do I insert an image in Google Sheets?"):
+
+1. **Server** resolves the message (e.g. "yes" → first suggestion) via `resolveMessage()`, then classifies intent.
+2. **Guidance path**: If there is an active session for the thread, it is abandoned. The server calls `askAIMultiStepPlan()` (Gemini) to get a plan: `taskSummary`, `steps[]` (instruction, highlights, completionSignal), `suggestedFollowUps[]`.
+3. **Session**: `createSession(threadId, question, plan)` stores the plan; context (screenshot, elements) is stored in `sessionContextMap`.
+4. **Show step**: `showCurrentStep(threadId)` builds the annotated image for the current step, broadcasts `STEP_PROGRESS` to the dashboard, sends `SHOW_GUIDANCE` and `STEP_GUIDANCE` to the extension overlay, and sends `WATCH_FOR_COMPLETION` (threadId, sessionId, stepNumber, signal) to the extension.
+5. **Watcher** (content script): Runs in the observed tab. For `dom_appeared` / `dom_disappeared` it uses a MutationObserver; for `url_changed` it polls `location.href`; for `user_clicked_target` it attaches a one-time click listener to the target or highlighted element. Max 60s timeout; then it sends `STEP_ABANDONED` to the background.
+6. **On completion**: Content script sends `STEP_COMPLETED` to background → server. Server runs a short Gemini verification; if verified, `advanceStep(threadId)`. If there is a next step, `showCurrentStep(threadId)` again; otherwise `completeSession(threadId)`, sends `CLEAR_GUIDANCE`, and broadcasts `TASK_COMPLETE` (message + suggestions).
+7. **Dashboard / Desktop**: Chat shows step progress ("Step 2 of 4 — …"), task complete message, and clickable suggestion chips. Clicking a chip or typing "yes" starts a new message with that suggestion.
+
+New message types: `GUIDANCE_SESSION_START`, `STEP_PROGRESS`, `TASK_COMPLETE`, `GUIDANCE_ABANDONED` (dashboard); `WATCH_FOR_COMPLETION` (server → extension); `STEP_COMPLETED`, `STEP_ABANDONED` (extension → server).
+
 ---
 
 ## 3. Project Structure

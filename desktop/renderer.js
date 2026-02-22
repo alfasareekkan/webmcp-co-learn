@@ -13,6 +13,9 @@ const state = {
   sidebarOpen: true,
   chatRatio: 0.45,
   webmcp: { available: false, tools: [], url: null },
+  guidanceTaskSummary: null,
+  guidanceTotalSteps: 0,
+  guidanceSuggestions: [],
 };
 
 /* ===== DOM refs ===== */
@@ -145,6 +148,52 @@ function handleMessage(data) {
       renderChat();
       break;
     }
+    case "GUIDANCE_SESSION_START":
+      state.guidanceTaskSummary = data.taskSummary;
+      state.guidanceTotalSteps = data.totalSteps || 0;
+      state.guidanceSuggestions = [];
+      renderChat();
+      break;
+    case "STEP_PROGRESS":
+      state.guidanceTaskSummary = data.taskSummary || state.guidanceTaskSummary;
+      state.guidanceTotalSteps = data.totalSteps || state.guidanceTotalSteps;
+      state.chatMessages = [
+        ...state.chatMessages.filter((m) => !m.isStepProgress),
+        {
+          isStepProgress: true,
+          stepNumber: data.stepNumber,
+          totalSteps: data.totalSteps,
+          instruction: data.instruction,
+          image: data.image,
+          guidance: data.guidance,
+          timestamp: Date.now(),
+        },
+      ];
+      renderChat();
+      renderMirror();
+      break;
+    case "TASK_COMPLETE":
+      state.guidanceSuggestions = data.suggestions || [];
+      state.chatMessages.push({
+        text: data.message,
+        sender: "ai",
+        timestamp: Date.now(),
+        isTaskComplete: true,
+        suggestions: state.guidanceSuggestions,
+      });
+      state.guidanceTaskSummary = null;
+      renderChat();
+      break;
+    case "GUIDANCE_ABANDONED":
+      state.guidanceTaskSummary = null;
+      state.guidanceSuggestions = [];
+      state.chatMessages.push({
+        text: "\u26A0 " + (data.reason || "Guidance stopped"),
+        sender: "system",
+        timestamp: Date.now(),
+      });
+      renderChat();
+      break;
   }
 }
 
@@ -311,6 +360,25 @@ function renderChat() {
   let html = "";
 
   for (const msg of msgs) {
+    if (msg.isStepProgress) {
+      html += `<div class="chat-bubble step-progress">
+        <div class="bubble-sender">Step</div>
+        <div class="step-progress-text">\uD83D\uCCCD Step ${msg.stepNumber} of ${msg.totalSteps} — ${escapeHtml(msg.instruction)}</div>
+        ${msg.image ? `<div class="annotated-image-wrap"><img src="${msg.image}" alt="Step" class="annotated-image" onclick="this.classList.toggle('expanded')" /></div>` : ""}
+        <div class="bubble-meta">Waiting for you...</div>
+      </div>`;
+      continue;
+    }
+    if (msg.isTaskComplete) {
+      const sugs = msg.suggestions || [];
+      html += `<div class="chat-bubble ai task-complete">
+        <div class="bubble-sender">CoLearn AI</div>
+        <div class="bubble-text">${renderText(msg.text)}</div>
+        ${sugs.length ? `<div class="suggestion-chips" data-suggestions='${JSON.stringify(sugs).replace(/'/g, "&#39;")}'>${sugs.map((s, i) => `<button type="button" class="suggestion-chip" data-idx="${i}">${escapeHtml(s)}</button>`).join("")}</div>` : ""}
+        <div class="bubble-meta">${formatTime(msg.timestamp)}</div>
+      </div>`;
+      continue;
+    }
     if (msg.sender === "agent-step") {
       const icon = ACTION_ICONS[msg.agentAction] || "\u2699";
       const mode = msg.executionMode || "langgraph-dom";
@@ -396,6 +464,20 @@ function renderChat() {
 
   if (wasAtBottom) scrollEl.scrollTop = scrollEl.scrollHeight;
 }
+
+chatMessages.addEventListener("click", (e) => {
+  const chip = e.target.closest(".suggestion-chip");
+  if (!chip) return;
+  const container = chip.closest(".suggestion-chips");
+  if (!container || !container.dataset.suggestions) return;
+  try {
+    const suggestions = JSON.parse(container.dataset.suggestions.replace(/&#39;/g, "'"));
+    const idx = parseInt(chip.dataset.idx, 10);
+    if (Number.isFinite(idx) && suggestions[idx]) {
+      wsSend({ type: "CHAT_MESSAGE", text: suggestions[idx] });
+    }
+  } catch (_) {}
+});
 
 // Guidance toggle handler (global)
 window.toggleGuidance = function (btn) {

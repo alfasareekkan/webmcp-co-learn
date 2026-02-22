@@ -105,6 +105,56 @@ function wsSend(data) {
 connectWS();
 
 // ---------------------------------------------------------------------------
+// Programmatic content-script injection (handles tabs open before extension loaded)
+// ---------------------------------------------------------------------------
+async function injectContentScripts(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (isRestrictedUrl(tab.url)) {
+      console.warn("[CoLearn] [WATCHER] Cannot inject into restricted URL:", tab.url);
+      return false;
+    }
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["overlay.js"] });
+    console.log("[CoLearn] [WATCHER] Content scripts injected into tab", tabId);
+    return true;
+  } catch (err) {
+    console.warn("[CoLearn] [WATCHER] Script injection failed:", err.message);
+    return false;
+  }
+}
+
+// Send a message to the tab's content script; auto-injects scripts if not yet running.
+async function sendToTab(tabId, msg) {
+  try {
+    await chrome.tabs.sendMessage(tabId, msg);
+  } catch (firstErr) {
+    console.warn("[CoLearn] Content script unreachable — injecting and retrying...", firstErr.message);
+    const ok = await injectContentScripts(tabId);
+    if (ok) {
+      await sleep(300); // let scripts register their message listeners
+      try {
+        await chrome.tabs.sendMessage(tabId, msg);
+        console.log("[CoLearn] Message delivered after injection:", msg.type);
+        return;
+      } catch (retryErr) {
+        console.warn("[CoLearn] Still unreachable after injection:", retryErr.message);
+      }
+    }
+    // All retries failed — for WATCH_FOR_COMPLETION report an abandonment so the
+    // session doesn't hang forever.
+    if (msg.type === "WATCH_FOR_COMPLETION") {
+      wsSend({
+        type: "STEP_ABANDONED",
+        threadId: msg.threadId,
+        sessionId: msg.sessionId,
+        reason: "Tab unreachable — reload the page and try again",
+      });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Handle messages FROM backend
 // ---------------------------------------------------------------------------
 async function handleBackendMessage(msg) {
@@ -213,18 +263,40 @@ async function handleBackendMessage(msg) {
     }
   }
 
-  // Relay guidance overlay commands to the active tab's content script
-  if (msg.type === "SHOW_GUIDANCE" || msg.type === "CLEAR_GUIDANCE" || msg.type === "STEP_GUIDANCE") {
+  // Relay guidance overlay commands and watcher config to the active tab's content script.
+  // sendToTab() auto-injects the scripts if they aren't running yet (pre-existing tabs).
+  if (msg.type === "SHOW_GUIDANCE" || msg.type === "CLEAR_GUIDANCE" || msg.type === "STEP_GUIDANCE" || msg.type === "WATCH_FOR_COMPLETION") {
     const tabId = state.activeTabId;
     if (tabId) {
-      try {
-        await chrome.tabs.sendMessage(tabId, msg);
-      } catch (err) {
-        console.warn("[CoLearn] Could not send guidance to tab:", err.message);
-      }
+      await sendToTab(tabId, msg);
     }
   }
 }
+
+// Content script can send STEP_COMPLETED / STEP_ABANDONED back; forward to server
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type === "STEP_COMPLETED") {
+    console.log("[CoLearn] [WATCHER] Step completed from tab");
+    wsSend({
+      type: "STEP_COMPLETED",
+      threadId: message.threadId,
+      sessionId: message.sessionId,
+      stepNumber: message.stepNumber,
+      domSnapshot: message.domSnapshot,
+    });
+    sendResponse({ ok: true });
+  } else if (message.type === "STEP_ABANDONED") {
+    console.log("[CoLearn] [WATCHER] Step abandoned from tab:", message.reason);
+    wsSend({
+      type: "STEP_ABANDONED",
+      threadId: message.threadId,
+      sessionId: message.sessionId,
+      reason: message.reason,
+    });
+    sendResponse({ ok: true });
+  }
+  return false;
+});
 
 // ---------------------------------------------------------------------------
 // Site-type detection for routing actions through the right execution path

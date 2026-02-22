@@ -7,6 +7,9 @@
 
   // Don't observe our own dashboard
   if (location.host === "localhost:5173") return;
+  // Guard against double-injection when scripts are injected programmatically
+  if (window.__colearn_content_injected__) return;
+  window.__colearn_content_injected__ = true;
 
   const MAX_TEXT_LENGTH = 100;
   const OBSERVED_APPS = {
@@ -116,9 +119,112 @@
     };
   }
 
+  const WATCHER_TIMEOUT_MS = 60000;
+
+  function runWatcher(config) {
+    const { threadId, sessionId, stepNumber, signal } = config;
+    const type = signal?.type || "user_clicked_target";
+    const targetSelector = signal?.targetSelector || "";
+
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        cleanup();
+        console.warn("[CoLearn] [WATCHER] Timeout after 60s");
+        reject({ type: "STEP_ABANDONED", threadId, sessionId, reason: "Step timed out (60s)" });
+      }, WATCHER_TIMEOUT_MS);
+
+      function cleanup() {
+        clearTimeout(timeoutId);
+        if (observer) observer.disconnect();
+        if (urlInterval) clearInterval(urlInterval);
+        if (clickTarget && clickTarget.removeEventListener) clickTarget.removeEventListener("click", onTargetClick);
+      }
+
+      function done(domSnapshot) {
+        cleanup();
+        resolve({
+          type: "STEP_COMPLETED",
+          threadId,
+          sessionId,
+          stepNumber,
+          domSnapshot: domSnapshot || null,
+        });
+      }
+
+      let observer;
+      let urlInterval;
+      let clickTarget;
+      let onTargetClick;
+
+      if (type === "dom_appeared") {
+        const prevCount = document.body ? document.body.getElementsByTagName("*").length : 0;
+        let debounceTimer = null;
+        observer = new MutationObserver(() => {
+          clearTimeout(debounceTimer);
+          debounceTimer = setTimeout(() => {
+            const nextCount = document.body ? document.body.getElementsByTagName("*").length : 0;
+            if (nextCount > prevCount + 8) {
+              done({ elementCount: nextCount });
+            }
+          }, 300);
+        });
+        observer.observe(document.body || document.documentElement, { childList: true, subtree: true });
+      } else if (type === "dom_disappeared") {
+        const prevCount = document.body ? document.body.getElementsByTagName("*").length : 0;
+        let debounceTimer = null;
+        observer = new MutationObserver(() => {
+          clearTimeout(debounceTimer);
+          debounceTimer = setTimeout(() => {
+            const nextCount = document.body ? document.body.getElementsByTagName("*").length : 0;
+            if (nextCount < prevCount - 8) {
+              done({ elementCount: nextCount });
+            }
+          }, 300);
+        });
+        observer.observe(document.body || document.documentElement, { childList: true, subtree: true });
+      } else if (type === "url_changed") {
+        const baseline = location.href;
+        urlInterval = setInterval(() => {
+          if (location.href !== baseline) {
+            done({ url: location.href });
+          }
+        }, 500);
+      } else {
+        const el = targetSelector
+          ? document.querySelector(targetSelector)
+          : document.querySelector(".__colearn_highlight");
+        if (el) {
+          clickTarget = el;
+          onTargetClick = () => done({ clicked: true });
+          el.addEventListener("click", onTargetClick, { once: true });
+        } else {
+          document.body.addEventListener("click", function oneClick(e) {
+            if (e.target.closest && e.target.closest(".__colearn_highlight")) {
+              document.body.removeEventListener("click", oneClick);
+              done({ clicked: true });
+            }
+          }, { once: true });
+        }
+      }
+    });
+  }
+
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === "GET_PAGE_CONTEXT") {
       sendResponse(extractPageContext());
+    } else if (msg.type === "WATCH_FOR_COMPLETION") {
+      runWatcher(msg)
+        .then((result) => {
+          chrome.runtime.sendMessage(result);
+          sendResponse({ ok: true });
+        })
+        .catch((result) => {
+          if (result && result.type === "STEP_ABANDONED") {
+            chrome.runtime.sendMessage(result);
+          }
+          sendResponse({ ok: false });
+        });
+      return true;
     }
   });
 

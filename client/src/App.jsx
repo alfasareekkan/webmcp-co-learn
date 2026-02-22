@@ -14,6 +14,9 @@ export default function App() {
   const [agentStatus, setAgentStatus] = useState({ status: "idle" });
   const [providers, setProviders] = useState([]);
   const [activeModels, setActiveModels] = useState({ agent: null, guidance: null });
+  const [guidanceSession, setGuidanceSession] = useState({ taskSummary: null, totalSteps: 0 });
+  const [stepProgress, setStepProgress] = useState(null);
+  const [guidanceSuggestions, setGuidanceSuggestions] = useState([]);
 
   // Resizable panels: chatRatio = fraction of main-content height for chat
   const [chatRatio, setChatRatio] = useState(0.45);
@@ -87,6 +90,59 @@ export default function App() {
           }
           return [...prev, stepMsg];
         });
+        break;
+      case "GUIDANCE_SESSION_START":
+        setGuidanceSession({ taskSummary: data.taskSummary, totalSteps: data.totalSteps || 0 });
+        setGuidanceSuggestions([]);
+        break;
+      case "STEP_PROGRESS":
+        setGuidanceSession((s) => ({ ...s, taskSummary: data.taskSummary || s.taskSummary, totalSteps: data.totalSteps || s.totalSteps }));
+        setStepProgress({
+          stepNumber: data.stepNumber,
+          totalSteps: data.totalSteps,
+          instruction: data.instruction,
+          image: data.image,
+          guidance: data.guidance,
+        });
+        setChatMessages((prev) => [
+          // Mark previous active step as completed — it persists with a checkmark
+          ...prev.map((m) =>
+            m.isStepProgress && !m.isStepCompleted ? { ...m, isStepCompleted: true } : m
+          ),
+          {
+            isStepProgress: true,
+            stepNumber: data.stepNumber,
+            totalSteps: data.totalSteps,
+            instruction: data.instruction,
+            image: data.image,
+            guidance: data.guidance,
+            timestamp: Date.now(),
+          },
+        ]);
+        break;
+      case "TASK_COMPLETE":
+        setGuidanceSuggestions(data.suggestions || []);
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            text: data.message,
+            sender: "ai",
+            timestamp: Date.now(),
+            isTaskComplete: true,
+            suggestions: data.suggestions || [],
+          },
+        ]);
+        setGuidanceSession({ taskSummary: null, totalSteps: 0 });
+        setStepProgress(null);
+        break;
+      case "GUIDANCE_ABANDONED":
+        setGuidanceSession({ taskSummary: null, totalSteps: 0 });
+        setStepProgress(null);
+        setGuidanceSuggestions([]);
+        setChatMessages((prev) => [
+          ...prev,
+          { text: "⚠️ " + (data.reason || "Guidance stopped"), sender: "system", timestamp: Date.now() },
+        ]);
         break;
     }
   }, []);
@@ -167,6 +223,8 @@ export default function App() {
           providers={providers}
           activeModels={activeModels}
           wsSend={send}
+          guidanceSuggestions={guidanceSuggestions}
+          taskSummary={guidanceSession.taskSummary}
         />
       </main>
     </div>

@@ -154,6 +154,19 @@ function GuidanceActions({ guidance, wsSend }) {
   );
 }
 
+function TaskSummaryCard({ summary }) {
+  if (!summary) return null;
+  return (
+    <div className="task-summary-card">
+      <span className="task-summary-icon">&#9676;</span>
+      <div className="task-summary-content">
+        <div className="task-summary-label">Guided task</div>
+        <div className="task-summary-text">{summary}</div>
+      </div>
+    </div>
+  );
+}
+
 function ModelSelector({ providers, activeModels, wsSend }) {
   const [open, setOpen] = useState(false);
 
@@ -225,7 +238,7 @@ function ModelSelector({ providers, activeModels, wsSend }) {
   );
 }
 
-export default function ChatPanel({ messages, onSend, onStop, connected, aiThinking, agentStatus, providers, activeModels, wsSend }) {
+export default function ChatPanel({ messages, onSend, onStop, connected, aiThinking, agentStatus, providers, activeModels, wsSend, guidanceSuggestions = [], taskSummary = null }) {
   const [input, setInput] = useState("");
   const bottomRef = useRef(null);
 
@@ -240,7 +253,10 @@ export default function ChatPanel({ messages, onSend, onStop, connected, aiThink
     e.preventDefault();
     const text = input.trim();
     if (!text) return;
-    onSend(text);
+    const toSend = text.toLowerCase() === "yes" && guidanceSuggestions.length > 0
+      ? guidanceSuggestions[0]
+      : text;
+    onSend(toSend);
     setInput("");
   };
 
@@ -261,7 +277,8 @@ export default function ChatPanel({ messages, onSend, onStop, connected, aiThink
       </div>
 
       <div className="chat-messages">
-        {messages.length === 0 && !isBusy && (
+        <TaskSummaryCard summary={taskSummary} />
+        {messages.length === 0 && !isBusy && !taskSummary && (
           <div className="chat-empty">
             <div className="chat-empty-icon">🤖</div>
             <p>Browser Agent + AI Guide</p>
@@ -276,6 +293,46 @@ export default function ChatPanel({ messages, onSend, onStop, connected, aiThink
         )}
 
         {messages.map((msg, i) => {
+          if (msg.isStepProgress) {
+            if (msg.isStepCompleted) {
+              return (
+                <div className="chat-bubble step-done" key={i}>
+                  &#x2705; Step {msg.stepNumber} done
+                </div>
+              );
+            }
+            return (
+              <div className="chat-bubble step-progress" key={i}>
+                <div className="bubble-sender">Step</div>
+                <div className="step-progress-text">&#128205; Step {msg.stepNumber} of {msg.totalSteps} &mdash; {msg.instruction}</div>
+                {msg.image && <AnnotatedImage src={msg.image} />}
+                <div className="bubble-meta">Waiting for you&hellip;</div>
+              </div>
+            );
+          }
+          if (msg.isTaskComplete) {
+            return (
+              <div className={`chat-bubble ${senderClass(msg.sender)} task-complete`} key={i}>
+                <div className="bubble-sender">{senderLabel(msg.sender)}</div>
+                <div className="bubble-text">{renderText(msg.text)}</div>
+                {msg.suggestions?.length > 0 && (
+                  <div className="suggestion-chips">
+                    {msg.suggestions.map((s, j) => (
+                      <button
+                        type="button"
+                        key={j}
+                        className="suggestion-chip"
+                        onClick={() => onSend(s)}
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="bubble-meta">{formatTime(msg.timestamp)}</div>
+              </div>
+            );
+          }
           if (msg.sender === "agent-step") {
             return <AgentStepBubble key={i} msg={msg} />;
           }

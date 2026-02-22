@@ -417,6 +417,26 @@ html, body {
 }
 @keyframes agentProgress { 0%{transform:translateX(-100%)} 100%{transform:translateX(350%)} }
 
+/* Step progress & task complete */
+.chat-bubble.step-progress {
+  align-self: flex-start; background: var(--surface-2);
+  border-left: 3px solid #4CAF50; border-radius: 14px; padding: 10px 14px;
+}
+.step-progress-text { font-size: 13px; font-weight: 500; color: var(--text); margin: 4px 0; }
+.chat-bubble.task-complete { border-left: 3px solid #4CAF50; }
+.suggestion-chips {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px;
+}
+.suggestion-chip {
+  padding: 8px 14px; border-radius: 20px; font-size: 12px; font-weight: 500;
+  background: rgba(126, 112, 240, 0.15); color: var(--primary);
+  border: 1px solid rgba(126, 112, 240, 0.4); cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.suggestion-chip:hover {
+  background: rgba(126, 112, 240, 0.25); border-color: var(--primary);
+}
+
 /* Model Selector */
 .model-selector-wrapper { position: relative; }
 .model-selector-btn {

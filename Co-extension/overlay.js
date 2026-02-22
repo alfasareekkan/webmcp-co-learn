@@ -6,6 +6,9 @@
   "use strict";
 
   if (location.host === "localhost:5173") return;
+  // Guard against double-injection when scripts are injected programmatically
+  if (window.__colearn_overlay_injected__) return;
+  window.__colearn_overlay_injected__ = true;
 
   const HIGHLIGHT_COLORS = ["#FF3B6F", "#00BCD4", "#FF9800", "#4CAF50", "#9C27B0", "#2196F3"];
 
@@ -13,6 +16,9 @@
   let stepIndex = 0;
   let fadeTimer = null;
   let dismissed = false;
+  let currentStepInfo = { stepNumber: 0, totalSteps: 0, instruction: "", taskSummary: "" };
+  let progressMinimized = false;
+  let progressPanel = null;
 
   function injectStyles() {
     if (document.getElementById("__colearn_styles__")) return;
@@ -25,8 +31,12 @@
         border-radius: 4px;
         pointer-events: none;
         box-sizing: border-box;
-        animation: __cl_fadeIn 0.25s ease;
+        animation: __cl_fadeIn 0.25s ease, __cl_pulse 2s ease-in-out infinite;
         transition: opacity 0.4s ease;
+      }
+      @keyframes __cl_pulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.4); }
+        50% { box-shadow: 0 0 0 8px rgba(76, 175, 80, 0); }
       }
 
       /* --- Small numbered circle at corner (click-through) --- */
@@ -180,6 +190,143 @@
         from { opacity: 0; transform: translateY(12px); }
         to   { opacity: 1; transform: translateY(0); }
       }
+
+      /* --- Top-right step progress panel --- */
+      .__colearn_progress {
+        position: fixed;
+        top: 16px;
+        right: 16px;
+        z-index: 2147483647;
+        pointer-events: auto;
+        max-width: 264px;
+        font-family: -apple-system, "Inter", "Segoe UI", Roboto, sans-serif;
+        animation: __cl_slideDown 0.3s ease;
+      }
+
+      @keyframes __cl_slideDown {
+        from { opacity: 0; transform: translateY(-10px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+
+      .__colearn_progress_header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 7px 12px;
+        background: rgba(26, 29, 36, 0.93);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        border: 1px solid rgba(255,255,255,0.09);
+        border-radius: 10px;
+        cursor: pointer;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+        transition: background 0.15s;
+        user-select: none;
+      }
+
+      .__colearn_progress_header:hover { background: rgba(36, 40, 52, 0.95); }
+
+      .__colearn_progress_logo {
+        font-size: 12px;
+        flex-shrink: 0;
+      }
+
+      .__colearn_progress_summary {
+        flex: 1;
+        font-size: 11px;
+        font-weight: 600;
+        color: #e4e8f0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .__colearn_progress_toggle {
+        font-size: 9px;
+        color: #8a8f9c;
+        transition: transform 0.2s;
+        flex-shrink: 0;
+      }
+
+      .__colearn_progress.minimized .__colearn_progress_toggle {
+        transform: rotate(180deg);
+      }
+
+      .__colearn_progress_body {
+        margin-top: 4px;
+        padding: 10px 12px;
+        background: rgba(26, 29, 36, 0.93);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        border: 1px solid rgba(255,255,255,0.09);
+        border-radius: 10px;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+        animation: __cl_fadeIn 0.2s ease;
+      }
+
+      .__colearn_progress.minimized .__colearn_progress_body {
+        display: none;
+      }
+
+      .__colearn_progress_dots {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        margin-bottom: 8px;
+      }
+
+      .__colearn_dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        transition: all 0.3s;
+        flex-shrink: 0;
+      }
+
+      .__colearn_dot.done   { background: #4CAF50; }
+      .__colearn_dot.current {
+        background: #6c5ce7;
+        animation: __cl_dot_pulse 1.2s ease-in-out infinite;
+      }
+      .__colearn_dot.pending {
+        background: rgba(255,255,255,0.18);
+        border: 1px solid rgba(255,255,255,0.12);
+      }
+
+      @keyframes __cl_dot_pulse {
+        0%, 100% { transform: scale(1);   box-shadow: 0 0 0 0   rgba(108,92,231,0.5); }
+        50%       { transform: scale(1.35); box-shadow: 0 0 0 5px rgba(108,92,231,0);   }
+      }
+
+      .__colearn_progress_instr {
+        font-size: 12px;
+        font-weight: 500;
+        color: #e4e8f0;
+        line-height: 1.4;
+        margin-bottom: 7px;
+      }
+
+      .__colearn_progress_status {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 10px;
+        color: #8a8f9c;
+      }
+
+      .__colearn_status_dot {
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: #4CAF50;
+        flex-shrink: 0;
+        animation: __cl_status_pulse 1.5s ease-in-out infinite;
+      }
+
+      @keyframes __cl_status_pulse {
+        0%, 100% { opacity: 1; }
+        50%       { opacity: 0.25; }
+      }
     `;
     document.head.appendChild(style);
   }
@@ -190,6 +337,7 @@
       ".__colearn_highlight, .__colearn_pin, .__colearn_label, " +
       ".__colearn_tooltip, .__colearn_arrow_svg, .__colearn_pill"
     ).forEach((el) => el.remove());
+    removeProgressPanel();
     clearTimeout(fadeTimer);
     currentGuides = [];
     stepIndex = 0;
@@ -201,6 +349,95 @@
       ".__colearn_highlight, .__colearn_pin, .__colearn_label, " +
       ".__colearn_tooltip, .__colearn_arrow_svg"
     ).forEach((el) => el.classList.toggle("__colearn_faded", faded));
+  }
+
+  // ---- Top-right step progress panel ----
+  function renderProgressPanel(stepNumber, totalSteps, instruction, taskSummary) {
+    removeProgressPanel();
+
+    progressPanel = document.createElement("div");
+    progressPanel.className = "__colearn_progress" + (progressMinimized ? " minimized" : "");
+
+    // Clickable header — shows task summary, click toggles expand/collapse
+    const header = document.createElement("div");
+    header.className = "__colearn_progress_header";
+
+    const logo = document.createElement("span");
+    logo.className = "__colearn_progress_logo";
+    logo.textContent = "◈";
+
+    const summary = document.createElement("span");
+    summary.className = "__colearn_progress_summary";
+    summary.textContent = taskSummary || `Step ${stepNumber} of ${totalSteps}`;
+    summary.title = taskSummary || "";
+
+    const toggle = document.createElement("span");
+    toggle.className = "__colearn_progress_toggle";
+    toggle.textContent = "▲";
+
+    header.append(logo, summary, toggle);
+    header.onclick = () => {
+      progressMinimized = !progressMinimized;
+      progressPanel.classList.toggle("minimized", progressMinimized);
+    };
+
+    // Body — dots + instruction + waiting indicator
+    const body = document.createElement("div");
+    body.className = "__colearn_progress_body";
+
+    const dotsEl = document.createElement("div");
+    dotsEl.className = "__colearn_progress_dots";
+    for (let i = 1; i <= totalSteps; i++) {
+      const dot = document.createElement("span");
+      const cls = i < stepNumber ? "done" : i === stepNumber ? "current" : "pending";
+      dot.className = `__colearn_dot ${cls}`;
+      dotsEl.appendChild(dot);
+    }
+
+    const instr = document.createElement("div");
+    instr.className = "__colearn_progress_instr";
+    instr.textContent = instruction || "";
+
+    const status = document.createElement("div");
+    status.className = "__colearn_progress_status";
+    const sDot = document.createElement("span");
+    sDot.className = "__colearn_status_dot";
+    const sTxt = document.createElement("span");
+    sTxt.textContent = "Waiting for you\u2026";
+    status.append(sDot, sTxt);
+
+    body.append(dotsEl, instr, status);
+    progressPanel.append(header, body);
+    document.body.appendChild(progressPanel);
+  }
+
+  function removeProgressPanel() {
+    if (progressPanel) {
+      progressPanel.remove();
+      progressPanel = null;
+    }
+    // Fallback: remove any orphaned panels
+    document.querySelectorAll(".__colearn_progress").forEach((el) => el.remove());
+  }
+
+  function updateProgressPanel() {
+    if (!progressPanel) return;
+    // Update dots
+    const dots = progressPanel.querySelectorAll(".__colearn_dot");
+    dots.forEach((dot, i) => {
+      const stepNum = i + 1;
+      dot.className = `__colearn_dot ${
+        stepNum < currentStepInfo.stepNumber ? "done"
+        : stepNum === currentStepInfo.stepNumber ? "current"
+        : "pending"
+      }`;
+    });
+    // Update instruction
+    const instr = progressPanel.querySelector(".__colearn_progress_instr");
+    if (instr && currentStepInfo.instruction) instr.textContent = currentStepInfo.instruction;
+    // Update summary
+    const sum = progressPanel.querySelector(".__colearn_progress_summary");
+    if (sum && currentStepInfo.taskSummary) sum.textContent = currentStepInfo.taskSummary;
   }
 
   // ---- Element bounds ----
@@ -358,17 +595,33 @@
 
   // ---- Step-by-step mode ----
   function showStep(guides, idx) {
-    clearVisuals();
-    if (idx < 0 || idx >= guides.length) return;
-    stepIndex = idx;
-    clearTimeout(fadeTimer);
+    const doRender = () => {
+      clearVisuals();
+      if (idx < 0 || idx >= guides.length) return;
+      stepIndex = idx;
+      clearTimeout(fadeTimer);
+      renderSingleGuide(guides[idx], idx, guides.length, true);
+      if (idx > 0) {
+        renderArrow(guides[idx - 1], guides[idx], HIGHLIGHT_COLORS[(idx - 1) % HIGHLIGHT_COLORS.length]);
+      }
+      renderPill(guides, idx);
+      if (progressPanel) updateProgressPanel();
+    };
 
-    renderSingleGuide(guides[idx], idx, guides.length, true);
-    if (idx > 0) {
-      renderArrow(guides[idx - 1], guides[idx], HIGHLIGHT_COLORS[(idx - 1) % HIGHLIGHT_COLORS.length]);
+    const existing = document.querySelectorAll(
+      ".__colearn_highlight, .__colearn_pin, .__colearn_label, " +
+      ".__colearn_tooltip, .__colearn_arrow_svg"
+    );
+
+    if (existing.length > 0) {
+      existing.forEach((el) => {
+        el.style.transition = "opacity 0.2s ease";
+        el.style.opacity = "0";
+      });
+      setTimeout(doRender, 220);
+    } else {
+      doRender();
     }
-
-    renderPill(guides, idx);
   }
 
   // ---- Auto-fade after 6 seconds so overlay fades to subtle ----
@@ -386,6 +639,9 @@
     const isStepMode = activeStep >= 0;
 
     if (isStepMode) {
+      const total = currentStepInfo.totalSteps || guides.length;
+      const num = currentStepInfo.stepNumber || activeStep + 1;
+      const instr = currentStepInfo.instruction || "";
       // Step-by-step controls
       const prevBtn = document.createElement("button");
       prevBtn.className = "__colearn_pill_btn __colearn_pill_nav";
@@ -396,7 +652,8 @@
 
       const stepLabel = document.createElement("span");
       stepLabel.className = "__colearn_pill_label";
-      stepLabel.textContent = `${activeStep + 1}/${guides.length}`;
+      stepLabel.textContent = instr ? `Step ${num} of ${total}: ${instr}` : `${num}/${total}`;
+      stepLabel.title = instr || "";
 
       const nextBtn = document.createElement("button");
       nextBtn.className = "__colearn_pill_btn __colearn_pill_nav";
@@ -456,7 +713,17 @@
       removeOverlay();
       sendResponse({ ok: true });
     } else if (msg.type === "STEP_GUIDANCE") {
-      showStep(currentGuides, msg.step || 0);
+      if (msg.stepNumber != null) currentStepInfo.stepNumber = msg.stepNumber;
+      if (msg.totalSteps != null) currentStepInfo.totalSteps = msg.totalSteps;
+      if (msg.instruction != null) currentStepInfo.instruction = msg.instruction;
+      if (msg.taskSummary != null) currentStepInfo.taskSummary = msg.taskSummary;
+      renderProgressPanel(
+        currentStepInfo.stepNumber,
+        currentStepInfo.totalSteps,
+        currentStepInfo.instruction,
+        currentStepInfo.taskSummary
+      );
+      showStep(currentGuides, msg.step ?? 0);
       sendResponse({ ok: true });
     }
   });

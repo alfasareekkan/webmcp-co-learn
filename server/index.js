@@ -7,6 +7,7 @@ import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { annotateScreenshot } from "./annotate.js";
 import { createBrowserAgent, runBrowserAgent, classifyIntent } from "./agent.js";
 import { createChatModel, getAvailableProviders, getDefaultModel, getGuidanceModel } from "./models.js";
+import * as sessionManager from "./guidanceSessionManager.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -55,6 +56,9 @@ let latestWebMCP = { available: false, tools: [], url: null };
 
 // Abort controller for the currently running chat operation (agent or guidance)
 let activeChatAbort = null;
+
+// Last page context per threadId (for multi-step guidance session)
+const sessionContextMap = new Map();
 
 function pushEvent(event) {
   recentEvents.push(event);
@@ -320,6 +324,218 @@ async function buildAnnotatedImage(context, highlights) {
 }
 
 // ---------------------------------------------------------------------------
+// Multi-step guidance — Gemini prompt and response parser
+// ---------------------------------------------------------------------------
+const GUIDANCE_MULTI_STEP_PROMPT = `You are a step-by-step UI guidance expert helping a user complete a task inside a web application.
+
+User question: {{userQuestion}}
+Current page URL: {{pageUrl}}
+DOM elements with indices and bounding boxes: {{domElements}}
+
+Analyze the screenshot and DOM, then break this task into 2-5 clear sequential steps. For each step specify:
+- A short action instruction (max 10 words)
+- Which element index to highlight
+- What signal indicates the user completed this step
+
+Return ONLY valid JSON, no markdown, no explanation outside JSON:
+{
+  "taskSummary": "brief description of the full task",
+  "steps": [
+    {
+      "stepNumber": 1,
+      "instruction": "Click the Insert menu at the top",
+      "highlights": [
+        { "elementIndex": 12, "label": "Click here", "color": "#4CAF50", "arrow": true }
+      ],
+      "completionSignal": {
+        "type": "dom_appeared",
+        "description": "Insert dropdown menu is now visible",
+        "targetSelector": ""
+      }
+    }
+  ],
+  "suggestedFollowUps": [
+    "How do I resize this?",
+    "How do I delete this?",
+    "How do I move this?"
+  ]
+}
+
+completionSignal type guide:
+- dom_appeared: a new element appeared (menu, dialog, panel, modal)
+- dom_disappeared: an element closed or was removed (dialog closed)
+- url_changed: the page navigated to a new URL
+- user_clicked_target: user clicked the highlighted element itself
+
+Always return exactly 3 suggestedFollowUps relevant to what comes after this task completes.`;
+
+function buildDomElementsForPrompt(context) {
+  if (!context.elements?.length) return "(No elements provided)";
+  return context.elements
+    .map(
+      (el, i) =>
+        `[${i}] <${el.tag}> "${(el.text || "").slice(0, 80)}" bounds:{x:${el.bounds?.x ?? 0},y:${el.bounds?.y ?? 0},w:${el.bounds?.width ?? 0},h:${el.bounds?.height ?? 0}}${el.role ? ` role="${el.role}"` : ""}${el.id ? ` id="${el.id}"` : ""}`
+    )
+    .join("\n");
+}
+
+/**
+ * Parse Gemini response into a normalized plan.
+ * Accepts new multi-step format or old single-step format (text + highlights).
+ * @param {string} raw - Raw model response
+ * @returns {{ taskSummary: string, steps: Array, suggestedFollowUps: string[] }}
+ */
+function parseGuidanceResponse(raw) {
+  const cleaned = raw.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    return {
+      taskSummary: "Complete the task",
+      steps: [],
+      suggestedFollowUps: [],
+    };
+  }
+
+  // New format: has steps array
+  if (Array.isArray(parsed.steps) && parsed.steps.length > 0) {
+    const steps = parsed.steps.map((s) => ({
+      stepNumber: Number(s.stepNumber) || 0,
+      instruction: String(s.instruction || "").slice(0, 80) || "Continue",
+      highlights: (Array.isArray(s.highlights) ? s.highlights : []).map((h) => ({
+        elementIndex: Number(h.elementIndex),
+        label: String(h.label || "").slice(0, 30) || "Click here",
+        color: /^#[0-9A-Fa-f]{6}$/.test(h.color) ? h.color : "#4CAF50",
+        arrow: Boolean(h.arrow),
+      })),
+      completionSignal: {
+        type: ["dom_appeared", "dom_disappeared", "url_changed", "user_clicked_target"].includes(s.completionSignal?.type)
+          ? s.completionSignal.type
+          : "user_clicked_target",
+        description: String(s.completionSignal?.description || "").slice(0, 200) || "Step completed",
+        targetSelector: String(s.completionSignal?.targetSelector || ""),
+      },
+    }));
+    return {
+      taskSummary: String(parsed.taskSummary || "Complete the task").slice(0, 300),
+      steps,
+      suggestedFollowUps: Array.isArray(parsed.suggestedFollowUps)
+        ? parsed.suggestedFollowUps.slice(0, 3).map((s) => String(s).slice(0, 100))
+        : [],
+    };
+  }
+
+  // Old format: text + highlights → single-step plan
+  const text = String(parsed.text || "").trim();
+  const highlights = Array.isArray(parsed.highlights) ? parsed.highlights : [];
+  const instruction = text
+    .replace(/\*\*[^*]*\*\*/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .slice(0, 10)
+    .join(" ") || "Follow the guidance below";
+  const step = {
+    stepNumber: 1,
+    instruction,
+    highlights: highlights.map((h, i) => ({
+      elementIndex: Number(h.elementIndex),
+      label: String(h.label || h.reason || `${i + 1}`).slice(0, 30),
+      color: HIGHLIGHT_COLORS[i % HIGHLIGHT_COLORS.length],
+      arrow: true,
+    })),
+    completionSignal: {
+      type: "user_clicked_target",
+      description: "User clicked the highlighted element",
+      targetSelector: "",
+    },
+  };
+  return {
+    taskSummary: text.slice(0, 300) || "Complete the task",
+    steps: [step],
+    suggestedFollowUps: [],
+  };
+}
+
+/**
+ * Call Gemini for multi-step guidance plan. Returns normalized plan; falls back to 1-step on old format or parse error.
+ * @param {string} userMessage
+ * @param {object} context - { url, screenshot, elements, viewport, ... }
+ * @returns {Promise<{ taskSummary: string, steps: Array, suggestedFollowUps: string[] }>}
+ */
+async function askAIMultiStepPlan(userMessage, context) {
+  if (!activeGuidanceModel) {
+    return {
+      taskSummary: "No AI model configured.",
+      steps: [],
+      suggestedFollowUps: [],
+    };
+  }
+
+  const pageUrl = context?.url || "unknown";
+  const domElements = buildDomElementsForPrompt(context);
+  const prompt = GUIDANCE_MULTI_STEP_PROMPT.replace("{{userQuestion}}", userMessage)
+    .replace("{{pageUrl}}", pageUrl)
+    .replace("{{domElements}}", domElements);
+
+  const contentParts = [];
+  if (context?.screenshot) {
+    const base64Data = context.screenshot.replace(/^data:image\/\w+;base64,/, "");
+    contentParts.push({
+      type: "image_url",
+      image_url: { url: `data:image/jpeg;base64,${base64Data}` },
+    });
+  }
+  contentParts.push({ type: "text", text: prompt });
+
+  try {
+    const model = createChatModel(activeGuidanceModel.provider, activeGuidanceModel.model);
+    const messages = [
+      new HumanMessage({ content: contentParts }),
+    ];
+    let result = await model.invoke(messages);
+    let raw = typeof result.content === "string" ? result.content : JSON.stringify(result.content);
+
+    let plan = parseGuidanceResponse(raw);
+
+    // Retry once with stricter prompt on malformed JSON (no steps)
+    if (plan.steps.length === 0 && raw.trim().length > 0) {
+      const strictPrompt = `${prompt}\n\nIMPORTANT: You must respond with valid JSON only. Include a "steps" array with at least one step.`;
+      const retryContent = context?.screenshot
+        ? [contentParts[0], { type: "text", text: strictPrompt }]
+        : [{ type: "text", text: strictPrompt }];
+      result = await model.invoke([new HumanMessage({ content: retryContent })]);
+      raw = typeof result.content === "string" ? result.content : JSON.stringify(result.content);
+      plan = parseGuidanceResponse(raw);
+    }
+
+    if (plan.steps.length === 0) {
+      const text = (typeof result?.content === "string" ? result.content : "").slice(0, 500);
+      plan = {
+        taskSummary: text || "Complete the task",
+        steps: [{
+          stepNumber: 1,
+          instruction: "Follow the guidance above",
+          highlights: [],
+          completionSignal: { type: "user_clicked_target", description: "User acknowledged", targetSelector: "" },
+        }],
+        suggestedFollowUps: [],
+      };
+    }
+
+    return plan;
+  } catch (err) {
+    console.error("[AI] Multi-step guidance error:", err.message);
+    return {
+      taskSummary: `Error: ${err.message}`,
+      steps: [],
+      suggestedFollowUps: [],
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // WebSocket
 // ---------------------------------------------------------------------------
 wss.on("connection", (ws, req) => {
@@ -432,6 +648,16 @@ wss.on("connection", (ws, req) => {
         break;
       }
 
+      case "STEP_COMPLETED": {
+        handleStepCompleted(msg);
+        break;
+      }
+
+      case "STEP_ABANDONED": {
+        handleStepAbandoned(msg);
+        break;
+      }
+
       case "CHAT_MESSAGE": {
         handleChatMessage(msg.text, ws);
         break;
@@ -536,6 +762,263 @@ function handleSetModel(msg) {
 }
 
 // ---------------------------------------------------------------------------
+// Message resolver — "yes" / follow-up suggestions (run first in message handling)
+// ---------------------------------------------------------------------------
+const AFFIRMATIVES = ["yes", "sure", "yeah", "ok", "please", "yep", "yup", "okay"];
+
+function resolveMessage(threadId, rawText) {
+  const suggestions = sessionManager.getLastSuggestions(threadId);
+  if (!suggestions || suggestions.length === 0) return rawText;
+  const normalized = String(rawText || "").toLowerCase().trim();
+  if (AFFIRMATIVES.includes(normalized)) return suggestions[0];
+  for (const s of suggestions) {
+    if (s.toLowerCase().includes(normalized) || normalized.includes(s.toLowerCase().slice(0, 20))) return s;
+  }
+  return rawText;
+}
+
+// ---------------------------------------------------------------------------
+// Multi-step guidance flow — showCurrentStep, handleStepCompleted, verify
+// ---------------------------------------------------------------------------
+/**
+ * Verify step completion using a fresh screenshot.
+ * The watcher fires when a DOM/URL/click signal occurs; this call confirms by
+ * letting the AI look at the actual screen state.
+ *
+ * @param {string} instruction  - The step instruction ("Click the Insert menu")
+ * @param {string} expected     - The completion signal description ("Insert dropdown visible")
+ * @param {object} context      - Fresh page context including screenshot
+ * @returns {Promise<{ verified: boolean, reason: string }>}
+ */
+async function verifyStepWithScreenshot(instruction, expected, context) {
+  // No model → trust the watcher
+  if (!activeGuidanceModel) return { verified: true, reason: "no model" };
+  // No screenshot → trust the watcher (can't verify visually)
+  if (!context?.screenshot) {
+    console.log("[STEP] No screenshot available — trusting watcher signal");
+    return { verified: true, reason: "no screenshot" };
+  }
+
+  const VERIFY_TIMEOUT_MS = 5000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), VERIFY_TIMEOUT_MS);
+
+  try {
+    const model = createChatModel(activeGuidanceModel.provider, activeGuidanceModel.model);
+    const base64 = context.screenshot.replace(/^data:image\/\w+;base64,/, "");
+
+    const prompt = `You are verifying whether a user completed a UI step.
+
+Step instruction: "${instruction}"
+Expected result: "${expected}"
+
+Look at the screenshot carefully. Has the user completed this step?
+Reply with ONLY valid JSON — no markdown, no explanation:
+{"verified": true or false, "reason": "one sentence explaining what you see"}`;
+
+    const result = await model.invoke([
+      new HumanMessage({
+        content: [
+          { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64}` } },
+          { type: "text", text: prompt },
+        ],
+      }),
+    ]);
+
+    clearTimeout(timer);
+    const raw = typeof result.content === "string" ? result.content : JSON.stringify(result.content);
+    const cleaned = raw.replace(/```json\s*/gi, "").replace(/```/g, "").trim();
+    const parsed = JSON.parse(cleaned);
+    const verified = Boolean(parsed.verified);
+    console.log(`[STEP] Screenshot verification: ${verified ? "✅ verified" : "❌ not verified"} — ${parsed.reason || ""}`);
+    return { verified, reason: parsed.reason || "" };
+  } catch (err) {
+    clearTimeout(timer);
+    // On timeout or any error → trust the watcher (never block the user)
+    console.log(`[STEP] Verification error (${err.message}) — defaulting to verified=true`);
+    return { verified: true, reason: "verification error" };
+  }
+}
+
+async function showCurrentStep(threadId) {
+  const session = sessionManager.getSession(threadId);
+  const step = sessionManager.getCurrentStep(threadId);
+  if (!session || !step) return;
+  const context = sessionContextMap.get(threadId);
+  const totalSteps = session.steps.length;
+  const stepNumber = step.stepNumber;
+
+  console.log(`[STEP] Showing step ${stepNumber} of ${totalSteps} — ${step.instruction}`);
+
+  const highlights = step.highlights || [];
+  const guidanceData = context?.elements?.length
+    ? highlights.map((h, i) => {
+        const el = context.elements[h.elementIndex];
+        if (!el?.bounds) return null;
+        return {
+          bounds: el.bounds,
+          label: h.label || `${i + 1}`,
+          reason: "",
+          color: h.color || HIGHLIGHT_COLORS[i % HIGHLIGHT_COLORS.length],
+          selector: el.id ? `#${el.id}` : null,
+        };
+      }).filter(Boolean)
+    : [];
+
+  let annotatedImage = null;
+  if (highlights.length > 0 && context?.screenshot && context?.elements?.length) {
+    const boxes = highlights.map((h, i) => {
+      const el = context.elements[h.elementIndex];
+      if (!el?.bounds) return null;
+      return {
+        x: el.bounds.x, y: el.bounds.y,
+        width: el.bounds.width, height: el.bounds.height,
+        label: h.label || `${i + 1}`,
+        color: h.color || HIGHLIGHT_COLORS[i % HIGHLIGHT_COLORS.length],
+      };
+    }).filter(Boolean);
+    if (boxes.length > 0) {
+      annotatedImage = await buildAnnotatedImage(context, step.highlights);
+    }
+  }
+
+  sessionManager.setActive(threadId);
+
+  if (annotatedImage) {
+    latestScreenshot = { dataUrl: annotatedImage, url: context?.url || "", timestamp: Date.now() };
+    broadcast("dashboard", { type: "SCREENSHOT", ...latestScreenshot });
+  }
+
+  broadcast("dashboard", {
+    type: "STEP_PROGRESS",
+    stepNumber,
+    totalSteps,
+    instruction: step.instruction,
+    taskSummary: session.taskSummary,
+    image: annotatedImage,
+    guidance: guidanceData,
+  });
+
+  if (guidanceData.length > 0) {
+    sendToExtension({ type: "SHOW_GUIDANCE", guides: guidanceData });
+  }
+  sendToExtension({
+    type: "STEP_GUIDANCE",
+    step: session.currentStepIndex,
+    stepNumber,
+    totalSteps,
+    instruction: step.instruction,
+    taskSummary: session.taskSummary,
+  });
+  const selectorFromHighlight = guidanceData[0]?.selector || "";
+  sendToExtension({
+    type: "WATCH_FOR_COMPLETION",
+    threadId,
+    sessionId: session.sessionId,
+    stepNumber,
+    signal: {
+      ...(step.completionSignal || { type: "user_clicked_target", description: "", targetSelector: "" }),
+      targetSelector: (step.completionSignal?.targetSelector || selectorFromHighlight) || "",
+    },
+  });
+
+  sessionManager.setWaitingForStep(threadId);
+}
+
+async function handleStepCompleted(msg) {
+  const { threadId, sessionId, stepNumber } = msg;
+  console.log(`[WATCHER] STEP_COMPLETED`, { threadId, sessionId, stepNumber });
+
+  const session = sessionManager.getSession(threadId);
+  const currentStep = sessionManager.getCurrentStep(threadId);
+  if (!session || !currentStep || String(currentStep.stepNumber) !== String(stepNumber)) {
+    console.log("[STEP] Ignoring STEP_COMPLETED — session or step mismatch");
+    return;
+  }
+
+  // Immediate feedback so the user sees the system reacted
+  broadcast("dashboard", {
+    type: "CHAT_MESSAGE",
+    text: `✔ Step ${stepNumber} detected — verifying…`,
+    sender: "system",
+    timestamp: Date.now(),
+  });
+
+  // Capture a fresh screenshot (capped at 4s so we never hang here).
+  let freshContext = null;
+  try {
+    freshContext = await Promise.race([
+      requestContextFromExtension(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("context timeout")), 4000)),
+    ]);
+    // Keep the dashboard mirror updated with the latest screenshot
+    if (freshContext?.screenshot) {
+      latestScreenshot = { dataUrl: freshContext.screenshot, url: freshContext.url, timestamp: Date.now() };
+      broadcast("dashboard", { type: "SCREENSHOT", ...latestScreenshot });
+    }
+  } catch (err) {
+    console.log(`[STEP] Could not capture screenshot for verification: ${err.message} — trusting watcher`);
+  }
+
+  const completionDescription = currentStep.completionSignal?.description || "Step completed";
+  const { verified } = await verifyStepWithScreenshot(
+    currentStep.instruction,
+    completionDescription,
+    freshContext
+  );
+
+  if (!verified) {
+    // Increment a retry counter to avoid an infinite re-show loop on a bad screenshot.
+    session._verifyRetries = (session._verifyRetries || 0) + 1;
+    if (session._verifyRetries <= 2) {
+      console.log(`[STEP] Screenshot says not done yet (retry ${session._verifyRetries}/2) — re-watching`);
+      sessionManager.setActive(threadId);
+      showCurrentStep(threadId);
+      return;
+    }
+    // After 2 retries trust the watcher anyway — never block the user permanently.
+    console.log("[STEP] Max retries reached — advancing despite screenshot disagreement");
+  }
+
+  session._verifyRetries = 0;
+  console.log(`[STEP] Advancing from step ${stepNumber}`);
+
+  const nextStep = sessionManager.advanceStep(threadId);
+  if (nextStep) {
+    showCurrentStep(threadId);
+  } else {
+    sessionManager.completeSession(threadId);
+    sendToExtension({ type: "CLEAR_GUIDANCE" });
+    const suggestions = sessionManager.getLastSuggestions(threadId);
+    broadcast("dashboard", {
+      type: "TASK_COMPLETE",
+      message: `✅ ${session.taskSummary} — all done!`,
+      suggestions: suggestions || [],
+    });
+  }
+}
+
+function handleStepAbandoned(msg) {
+  const { threadId, reason } = msg;
+  console.log(`[WATCHER] STEP_ABANDONED`, { threadId, reason });
+  sessionManager.abandonSession(threadId);
+  sendToExtension({ type: "CLEAR_GUIDANCE" });
+  broadcast("dashboard", {
+    type: "GUIDANCE_ABANDONED",
+    reason: reason || "Guidance stopped",
+  });
+  const isTimeout = reason && String(reason).toLowerCase().includes("timeout");
+  if (isTimeout) {
+    broadcast("dashboard", {
+      type: "CHAT_MESSAGE",
+      text: "Still need help with this step? Type **yes** to retry.",
+      sender: "system",
+      timestamp: Date.now(),
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Chat handler — routes between GUIDANCE and ACTION modes
 // ---------------------------------------------------------------------------
 function handleStopChat() {
@@ -553,7 +1036,20 @@ function handleStopChat() {
 }
 
 async function handleChatMessage(text, senderWs) {
-  const userMsg = { type: "CHAT_MESSAGE", text, sender: "user", timestamp: Date.now() };
+  const threadId = "default";
+  const resolvedText = resolveMessage(threadId, text);
+  if (resolvedText !== text) {
+    console.log(`[SESSION] Resolved message to suggestion: "${resolvedText.slice(0, 50)}"`);
+  }
+
+  if (sessionManager.hasActiveSession(threadId)) {
+    sessionManager.abandonSession(threadId);
+    sessionContextMap.delete(threadId);
+    sendToExtension({ type: "CLEAR_GUIDANCE" });
+    broadcast("dashboard", { type: "GUIDANCE_ABANDONED", reason: "New message started" });
+  }
+
+  const userMsg = { type: "CHAT_MESSAGE", text: resolvedText, sender: "user", timestamp: Date.now() };
   pushEvent(userMsg);
   broadcast("dashboard", userMsg);
 
@@ -585,7 +1081,7 @@ async function handleChatMessage(text, senderWs) {
     }
   } catch {}
 
-  const intent = await classifyIntent(text, pageContext, classifierModel);
+  const intent = await classifyIntent(resolvedText, pageContext, classifierModel);
 
   // Detailed routing log
   const webmcpStatus = pageContext?.webmcp?.available
@@ -595,7 +1091,7 @@ async function handleChatMessage(text, senderWs) {
     ? `elements=${pageContext.elements?.length || 0}, screenshot=${!!pageContext.screenshot}`
     : "no context";
   console.log(`\x1b[32m[Chat] ━━━ ROUTING ━━━\x1b[0m`);
-  console.log(`  Message: "${text.slice(0, 80)}"`);
+  console.log(`  Message: "${resolvedText.slice(0, 80)}"`);
   console.log(`  Intent:  \x1b[1m${intent.toUpperCase()}\x1b[0m`);
   console.log(`  URL:     ${pageContext?.url || "unknown"}`);
   console.log(`  Context: ${contextInfo}`);
@@ -607,32 +1103,32 @@ async function handleChatMessage(text, senderWs) {
     case "action":
       if (browserAgent) {
         console.log(`\x1b[32m[Chat] → Routing to \x1b[1mLangGraph Agent\x1b[0m\x1b[32m (${activeAgentModel?.provider}/${activeAgentModel?.model})\x1b[0m`);
-        await handleAgentAction(text, abort.signal);
+        await handleAgentAction(resolvedText, abort.signal);
       } else {
         console.log(`\x1b[32m[Chat] → Agent unavailable, falling back to \x1b[1mChat mode\x1b[0m`);
-        await handleNormalChat(text, pageContext, abort.signal);
+        await handleNormalChat(resolvedText, pageContext, abort.signal);
       }
       break;
     case "guidance":
       console.log(`\x1b[32m[Chat] → Routing to \x1b[1mGuidance AI\x1b[0m\x1b[32m (screenshot + context analysis)\x1b[0m`);
-      await handleGuidanceChat(text, pageContext, abort.signal);
+      await handleGuidanceChat(resolvedText, pageContext, abort.signal);
       break;
     case "chat":
     default:
       console.log(`\x1b[32m[Chat] → Routing to \x1b[1mNormal Chat\x1b[0m`);
-      await handleNormalChat(text, pageContext, abort.signal);
+      await handleNormalChat(resolvedText, pageContext, abort.signal);
       break;
   }
 }
 
 // ---------------------------------------------------------------------------
-// GUIDANCE mode
+// GUIDANCE mode — multi-step session
 // ---------------------------------------------------------------------------
 async function handleGuidanceChat(text, prefetchedContext = null, signal = null) {
+  const threadId = "default";
   broadcast("dashboard", { type: "AI_THINKING", thinking: true });
 
   try {
-    // Reuse context already gathered during intent classification when available
     let context = prefetchedContext;
     if (!context) {
       try { context = await requestContextFromExtension(); }
@@ -642,7 +1138,6 @@ async function handleGuidanceChat(text, prefetchedContext = null, signal = null)
           dom: {}, elements: [], screenshot: null,
         };
       }
-
       if (context?.screenshot) {
         latestScreenshot = { dataUrl: context.screenshot, url: context.url, timestamp: Date.now() };
         broadcast("dashboard", { type: "SCREENSHOT", ...latestScreenshot });
@@ -651,40 +1146,29 @@ async function handleGuidanceChat(text, prefetchedContext = null, signal = null)
 
     if (signal?.aborted) return;
 
-    const aiResult = await askAI(text, context);
-
+    const plan = await askAIMultiStepPlan(text, context);
     if (signal?.aborted) return;
 
-    let annotatedImage = null;
-    if (aiResult.highlights.length > 0) {
-      annotatedImage = await buildAnnotatedImage(context, aiResult.highlights);
+    if (!plan.steps || plan.steps.length === 0) {
+      broadcast("dashboard", {
+        type: "CHAT_MESSAGE", text: plan.taskSummary || "No steps generated.",
+        sender: "ai", timestamp: Date.now(),
+      });
+      return;
     }
 
-    const guidanceData = aiResult.highlights.map((h, i) => {
-      const el = context.elements?.[h.elementIndex];
-      if (!el?.bounds) return null;
-      return {
-        bounds: el.bounds,
-        label: h.label || `${i + 1}`,
-        reason: h.reason || "",
-        color: HIGHLIGHT_COLORS[i % HIGHLIGHT_COLORS.length],
-        selector: el.id ? `#${el.id}` : null,
-      };
-    }).filter(Boolean);
+    sessionManager.createSession(threadId, text, plan);
+    sessionContextMap.set(threadId, context);
 
-    const aiMsg = {
-      type: "CHAT_MESSAGE", text: aiResult.text, sender: "ai", timestamp: Date.now(),
-      image: annotatedImage, highlights: aiResult.highlights,
-      guidance: guidanceData, context: { url: context.url, title: context.title },
-    };
-    pushEvent(aiMsg);
-    broadcast("dashboard", aiMsg);
+    broadcast("dashboard", {
+      type: "GUIDANCE_SESSION_START",
+      taskSummary: plan.taskSummary,
+      totalSteps: plan.steps.length,
+    });
 
-    if (guidanceData.length > 0) {
-      sendToExtension({ type: "SHOW_GUIDANCE", guides: guidanceData });
-    }
-
+    await showCurrentStep(threadId);
   } catch (err) {
+    console.error("[Guidance] Error:", err);
     broadcast("dashboard", {
       type: "CHAT_MESSAGE", text: `Error: ${err.message}`,
       sender: "system", timestamp: Date.now(),
