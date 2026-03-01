@@ -52,20 +52,36 @@ function renderText(text) {
   });
 }
 
+function ImageModal({ src, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div className="image-modal-overlay" onClick={onClose}>
+      <div className="image-modal-content" onClick={(e) => e.stopPropagation()}>
+        <img src={src} alt="Full size screenshot" className="image-modal-img" />
+        <button className="image-modal-close" onClick={onClose}>&times;</button>
+      </div>
+    </div>
+  );
+}
+
 function AnnotatedImage({ src }) {
-  const [expanded, setExpanded] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
 
   return (
     <div className="annotated-image-wrap">
       <img
         src={src}
         alt="Annotated screenshot"
-        className={`annotated-image ${expanded ? "expanded" : ""}`}
-        onClick={() => setExpanded(!expanded)}
+        className="annotated-image"
+        onClick={() => setModalOpen(true)}
       />
-      <div className="image-hint">
-        {expanded ? "Click to shrink" : "Click to expand"}
-      </div>
+      <div className="image-hint">Click to enlarge</div>
+      {modalOpen && <ImageModal src={src} onClose={() => setModalOpen(false)} />}
     </div>
   );
 }
@@ -189,6 +205,29 @@ function TaskSummaryCard({ summary }) {
   );
 }
 
+function GuidancePlanCard({ steps }) {
+  if (!steps?.length) return null;
+  return (
+    <div className="guidance-plan-card">
+      <div className="plan-card-header">
+        <span className="plan-card-icon">&#128203;</span>
+        <span className="plan-card-title">Step-by-step plan</span>
+        <span className="plan-card-count">{steps.filter(s => s.status === "completed").length}/{steps.length}</span>
+      </div>
+      <ol className="plan-card-steps">
+        {steps.map((s) => (
+          <li key={s.stepNumber} className={`plan-step plan-step-${s.status}`}>
+            <span className="plan-step-indicator">
+              {s.status === "completed" ? "\u2705" : s.status === "active" ? "\u25B6\uFE0F" : "\u25CB"}
+            </span>
+            <span className="plan-step-text">{s.instruction}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 function ModelSelector({ providers, activeModels, wsSend }) {
   const [open, setOpen] = useState(false);
 
@@ -260,7 +299,7 @@ function ModelSelector({ providers, activeModels, wsSend }) {
   );
 }
 
-export default function ChatPanel({ messages, onSend, onStop, connected, aiThinking, agentStatus, providers, activeModels, wsSend, guidanceSuggestions = [], taskSummary = null, onConfirmStepYes, onConfirmStepNo }) {
+export default function ChatPanel({ messages, onSend, onStop, connected, aiThinking, agentStatus, providers, activeModels, wsSend, guidanceSuggestions = [], taskSummary = null, onConfirmStepYes, onConfirmStepNo, guidancePlanSteps = null }) {
   const [input, setInput] = useState("");
   const bottomRef = useRef(null);
 
@@ -300,6 +339,7 @@ export default function ChatPanel({ messages, onSend, onStop, connected, aiThink
 
       <div className="chat-messages">
         <TaskSummaryCard summary={taskSummary} />
+        <GuidancePlanCard steps={guidancePlanSteps} />
         {messages.length === 0 && !isBusy && !taskSummary && (
           <div className="chat-empty">
             <div className="chat-empty-icon">🤖</div>

@@ -1229,6 +1229,15 @@ async function handleStepCompleted(msg) {
   session._verifyRetries = 0;
   console.log(`[STEP] Advancing from step ${stepNumber}`);
 
+  // Broadcast step status update so plan card can mark this step done
+  broadcast("dashboard", {
+    type: "STEP_STATUS_UPDATE",
+    completedStep: parseInt(stepNumber, 10),
+    nextStep: session.currentStepIndex + 1 < session.steps.length
+      ? session.steps[session.currentStepIndex + 1].stepNumber
+      : null,
+  });
+
   const nextStep = sessionManager.advanceStep(threadId);
   if (nextStep) {
     showCurrentStep(threadId);
@@ -1428,6 +1437,11 @@ async function handleGuidanceChat(text, prefetchedContext = null, signal = null)
       type: "GUIDANCE_SESSION_START",
       taskSummary: plan.taskSummary,
       totalSteps: plan.steps.length,
+      steps: plan.steps.map((s, i) => ({
+        stepNumber: s.stepNumber || i + 1,
+        instruction: s.instruction,
+        status: i === 0 ? "active" : "pending",
+      })),
     });
 
     await showCurrentStep(threadId);

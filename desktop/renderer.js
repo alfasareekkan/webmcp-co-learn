@@ -19,6 +19,7 @@ const state = {
   guidanceTaskSummary: null,
   guidanceTotalSteps:  0,
   guidanceSuggestions: [],
+  guidancePlanSteps: null,
   // Browser
   browser:     { tabs: [], activeIdx: -1, canGoBack: false, canGoForward: false, currentUrl: "" },
   extConnected: false,
@@ -152,7 +153,18 @@ function handleMessage(data) {
       state.guidanceTaskSummary = data.taskSummary;
       state.guidanceTotalSteps  = data.totalSteps || 0;
       state.guidanceSuggestions = [];
+      state.guidancePlanSteps   = data.steps || null;
       renderChat();
+      break;
+    case "STEP_STATUS_UPDATE":
+      if (state.guidancePlanSteps) {
+        state.guidancePlanSteps = state.guidancePlanSteps.map((s) => {
+          if (s.stepNumber === data.completedStep) return { ...s, status: "completed" };
+          if (s.stepNumber === data.nextStep) return { ...s, status: "active" };
+          return s;
+        });
+        renderChat();
+      }
       break;
     case "STEP_PROGRESS":
       state.guidanceTaskSummary = data.taskSummary || state.guidanceTaskSummary;
@@ -174,11 +186,15 @@ function handleMessage(data) {
         isTaskComplete: true, suggestions: state.guidanceSuggestions,
       });
       state.guidanceTaskSummary = null;
+      if (state.guidancePlanSteps) {
+        state.guidancePlanSteps = state.guidancePlanSteps.map(s => ({ ...s, status: "completed" }));
+      }
       renderChat();
       break;
     case "GUIDANCE_ABANDONED":
       state.guidanceTaskSummary = null;
       state.guidanceSuggestions = [];
+      state.guidancePlanSteps = null;
       state.chatMessages.push({ text: "\u26A0 " + (data.reason || "Guidance stopped"), sender: "system", timestamp: Date.now() });
       renderChat();
       break;
@@ -360,12 +376,35 @@ function renderChat() {
   chatEmpty.style.display = (msgs.length === 0 && !busy) ? "" : "none";
 
   let html = "";
+
+  // Render guidance plan card if steps exist
+  if (state.guidancePlanSteps?.length) {
+    const steps = state.guidancePlanSteps;
+    const doneCount = steps.filter(s => s.status === "completed").length;
+    html += `<div class="guidance-plan-card">
+      <div class="plan-card-header">
+        <span class="plan-card-icon">&#128203;</span>
+        <span class="plan-card-title">Step-by-step plan</span>
+        <span class="plan-card-count">${doneCount}/${steps.length}</span>
+      </div>
+      <ol class="plan-card-steps">
+        ${steps.map(s => {
+          const indicator = s.status === "completed" ? "&#x2705;" : s.status === "active" ? "&#x25B6;&#xFE0F;" : "&#x25CB;";
+          return `<li class="plan-step plan-step-${s.status}">
+            <span class="plan-step-indicator">${indicator}</span>
+            <span class="plan-step-text">${escHtml(s.instruction)}</span>
+          </li>`;
+        }).join("")}
+      </ol>
+    </div>`;
+  }
+
   for (const msg of msgs) {
     if (msg.isStepProgress) {
       html += `<div class="chat-bubble step-progress">
         <div class="bubble-sender">Step</div>
         <div class="step-progress-text">📍 Step ${msg.stepNumber} of ${msg.totalSteps} — ${escHtml(msg.instruction)}</div>
-        ${msg.image ? `<div class="annotated-image-wrap"><img src="${msg.image}" class="annotated-image" onclick="this.classList.toggle('expanded')" /></div>` : ""}
+        ${msg.image ? `<div class="annotated-image-wrap"><img src="${msg.image}" class="annotated-image" onclick="openImageModal(this.src)" /></div>` : ""}
         <div class="bubble-meta">Waiting for you…</div>
       </div>`;
       continue;
@@ -399,8 +438,8 @@ function renderChat() {
     let inner = `<div class="bubble-sender">${senderLabel(msg.sender)}</div>`;
     if (msg.image) {
       inner += `<div class="annotated-image-wrap">
-        <img src="${msg.image}" class="annotated-image" onclick="this.classList.toggle('expanded')" />
-        <div class="image-hint">Click to expand</div>
+        <img src="${msg.image}" class="annotated-image" onclick="openImageModal(this.src)" />
+        <div class="image-hint">Click to enlarge</div>
       </div>`;
     }
     if (msg.highlights?.length) {
@@ -467,6 +506,31 @@ window.toggleGuidance = function (btn) {
     btn.parentElement.appendChild(s);
   }
 };
+
+/* ── Image modal (full-size popup) ── */
+window.openImageModal = function (src) {
+  // Remove existing modal if any
+  document.getElementById("imageModal")?.remove();
+  const overlay = document.createElement("div");
+  overlay.id = "imageModal";
+  overlay.className = "image-modal-overlay";
+  overlay.innerHTML = `<div class="image-modal-content">
+    <img src="${src}" class="image-modal-img" />
+    <button class="image-modal-close" onclick="closeImageModal()">&times;</button>
+  </div>`;
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) closeImageModal();
+  });
+  document.body.appendChild(overlay);
+};
+
+window.closeImageModal = function () {
+  document.getElementById("imageModal")?.remove();
+};
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeImageModal();
+});
 
 /* ── Suggestion chip clicks ── */
 chatMessages.addEventListener("click", (e) => {
