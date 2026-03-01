@@ -39,7 +39,7 @@ const wss = new WebSocketServer({ server });
 // ---------------------------------------------------------------------------
 // Client tracking
 // ---------------------------------------------------------------------------
-const clients = { extension: new Set(), dashboard: new Set() };
+const clients = { extension: new Set(), dashboard: new Set(), desktop: new Set() };
 
 const recentEvents = [];
 const MAX_EVENTS = 500;
@@ -82,34 +82,52 @@ function sendToExtension(data) {
   return false;
 }
 
+function sendToDesktop(data) {
+  const msg = JSON.stringify(data);
+  for (const ws of clients.desktop) {
+    if (ws.readyState === 1) { ws.send(msg); return true; }
+  }
+  return false;
+}
+
+/**
+ * Send a CDP-requiring message (GATHER_CONTEXT / EXECUTE_ACTION).
+ * Prefers the Electron desktop client (which uses webContents.debugger);
+ * falls back to the extension (which uses chrome.debugger — only available
+ * in a real Chrome environment, not Electron).
+ */
+function sendToCdpClient(data) {
+  return sendToDesktop(data) || sendToExtension(data);
+}
+
 // ---------------------------------------------------------------------------
-// Request context from extension
+// Request context from CDP client (desktop preferred, extension fallback)
 // ---------------------------------------------------------------------------
 function requestContextFromExtension() {
   return new Promise((resolve, reject) => {
     const requestId = `ctx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const sent = sendToExtension({ type: "GATHER_CONTEXT", requestId });
+    const sent = sendToCdpClient({ type: "GATHER_CONTEXT", requestId });
     if (!sent) {
-      reject(new Error("No extension connected. Attach the debugger from the extension popup."));
+      reject(new Error("No browser client connected. Open the Electron app or attach the extension."));
       return;
     }
     const timer = setTimeout(() => {
       pendingContextRequests.delete(requestId);
-      reject(new Error("Context gathering timed out — is the debugger attached?"));
+      reject(new Error("Context gathering timed out"));
     }, CONTEXT_TIMEOUT);
     pendingContextRequests.set(requestId, { resolve, reject, timer });
   });
 }
 
 // ---------------------------------------------------------------------------
-// Request action execution from extension
+// Request action execution from CDP client (desktop preferred, extension fallback)
 // ---------------------------------------------------------------------------
 function requestActionExecution(action) {
   return new Promise((resolve, reject) => {
     const requestId = `act_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const sent = sendToExtension({ type: "EXECUTE_ACTION", requestId, action });
+    const sent = sendToCdpClient({ type: "EXECUTE_ACTION", requestId, action });
     if (!sent) {
-      reject(new Error("No extension connected. Attach the debugger from the extension popup."));
+      reject(new Error("No browser client connected. Open the Electron app or attach the extension."));
       return;
     }
     const timer = setTimeout(() => {
@@ -771,11 +789,13 @@ wss.on("connection", (ws, req) => {
       }
 
       case "SHOW_GUIDANCE": {
+        sendToDesktop({ type: "SHOW_GUIDANCE", guides: msg.guides || [] });
         sendToExtension({ type: "SHOW_GUIDANCE", guides: msg.guides || [] });
         break;
       }
 
       case "CLEAR_GUIDANCE": {
+        sendToDesktop({ type: "CLEAR_GUIDANCE" });
         sendToExtension({ type: "CLEAR_GUIDANCE" });
         break;
       }
@@ -973,12 +993,30 @@ async function showCurrentStep(threadId) {
     ? highlights.map((h, i) => {
         const el = context.elements[h.elementIndex];
         if (!el?.bounds) return null;
+        // Build a robust CSS selector — prefer ID, fall back to tag + attributes
+        let selector = null;
+        if (el.id) {
+          selector = `#${el.id}`;
+        } else {
+          // Build a selector from tag, role, aria-label, href, or text content
+          const tag = el.tag || '*';
+          if (el.role) {
+            selector = `${tag}[role="${el.role}"]`;
+          } else if (el.href) {
+            // Use href attribute for links (truncated to avoid overly long selectors)
+            const shortHref = el.href.length > 80 ? el.href.slice(0, 80) : el.href;
+            selector = `${tag}[href="${shortHref}"]`;
+          } else if (el.text && el.text.length <= 60) {
+            // Use :has or xpath-like text matching isn't standard CSS — leave for bounds
+            selector = null;
+          }
+        }
         return {
           bounds: el.bounds,
           label: h.label || `${i + 1}`,
           reason: "",
           color: h.color || HIGHLIGHT_COLORS[i % HIGHLIGHT_COLORS.length],
-          selector: el.id ? `#${el.id}` : null,
+          selector,
         };
       }).filter(Boolean)
     : [];
@@ -1017,9 +1055,22 @@ async function showCurrentStep(threadId) {
     guidance: guidanceData,
   });
 
-  if (guidanceData.length > 0) {
-    sendToExtension({ type: "SHOW_GUIDANCE", guides: guidanceData });
-  }
+  // Always send SHOW_GUIDANCE before STEP_GUIDANCE so the overlay's
+  // currentGuides state is populated.  Previously this was guarded by
+  // `guidanceData.length > 0`, which caused STEP_GUIDANCE to reference
+  // an empty currentGuides array when no valid highlights were found —
+  // resulting in the overlay progress panel appearing with no highlights.
+  sendToDesktop({ type: "SHOW_GUIDANCE", guides: guidanceData });
+  sendToExtension({ type: "SHOW_GUIDANCE", guides: guidanceData });
+
+  sendToDesktop({
+    type: "STEP_GUIDANCE",
+    step: session.currentStepIndex,
+    stepNumber,
+    totalSteps,
+    instruction: step.instruction,
+    taskSummary: session.taskSummary,
+  });
   sendToExtension({
     type: "STEP_GUIDANCE",
     step: session.currentStepIndex,
@@ -1183,6 +1234,7 @@ async function handleStepCompleted(msg) {
     showCurrentStep(threadId);
   } else {
     sessionManager.completeSession(threadId);
+    sendToDesktop({ type: "CLEAR_GUIDANCE" });
     sendToExtension({ type: "CLEAR_GUIDANCE" });
     const suggestions = sessionManager.getLastSuggestions(threadId);
     broadcast("dashboard", {
@@ -1221,6 +1273,7 @@ function handleStepAbandoned(msg) {
   // Explicit abandon (Tab unreachable, user cancelled, etc.) — end the session.
   stopPollingVerification(threadId);
   sessionManager.abandonSession(threadId);
+  sendToDesktop({ type: "CLEAR_GUIDANCE" });
   sendToExtension({ type: "CLEAR_GUIDANCE" });
   broadcast("dashboard", {
     type: "GUIDANCE_ABANDONED",
@@ -1255,6 +1308,7 @@ async function handleChatMessage(text, senderWs) {
   if (sessionManager.hasActiveSession(threadId)) {
     sessionManager.abandonSession(threadId);
     sessionContextMap.delete(threadId);
+    sendToDesktop({ type: "CLEAR_GUIDANCE" });
     sendToExtension({ type: "CLEAR_GUIDANCE" });
     broadcast("dashboard", { type: "GUIDANCE_ABANDONED", reason: "New message started" });
   }
@@ -1498,7 +1552,7 @@ app.get("/api/health", (_req, res) => {
     activeAgentModel,
     activeGuidanceModel,
     providers: availableProviders,
-    connections: { extension: clients.extension.size, dashboard: clients.dashboard.size },
+    connections: { extension: clients.extension.size, dashboard: clients.dashboard.size, desktop: clients.desktop.size },
     events: recentEvents.length,
     webmcp: latestWebMCP,
   });
