@@ -20,6 +20,8 @@ const state = {
   guidanceTotalSteps:  0,
   guidanceSuggestions: [],
   guidancePlanSteps: null,
+  conversations: [],
+  currentThreadId: null,
   // Browser
   browser:     { tabs: [], activeIdx: -1, canGoBack: false, canGoForward: false, currentUrl: "" },
   extConnected: false,
@@ -101,9 +103,15 @@ function handleMessage(data) {
         state.activeModels = { agent: data.activeAgentModel, guidance: data.activeGuidanceModel };
       }
       if (data.webmcp) state.webmcp = data.webmcp;
+      if (data.conversations) state.conversations = data.conversations;
+      // Auto-create first conversation if none exist
+      if (!state.currentThreadId) {
+        wsSend({ type: "NEW_CHAT" });
+      }
       renderEvents();
       renderModelSelector();
       renderWebMCP();
+      renderConversationList();
       break;
     case "WEBMCP_UPDATE":
       state.webmcp = data.webmcp || { available: false, tools: [] };
@@ -118,6 +126,10 @@ function handleMessage(data) {
       renderEvents();
       break;
     case "CHAT_MESSAGE":
+      // Track threadId from server (auto-created on first message if needed)
+      if (data.threadId && !state.currentThreadId) {
+        state.currentThreadId = data.threadId;
+      }
       state.chatMessages = [
         ...state.chatMessages.filter((m) => !m.isLiveStep),
         {
@@ -198,6 +210,45 @@ function handleMessage(data) {
       state.chatMessages.push({ text: "\u26A0 " + (data.reason || "Guidance stopped"), sender: "system", timestamp: Date.now() });
       renderChat();
       break;
+
+    // ── Conversation management ──
+    case "NEW_CHAT_CREATED":
+      state.currentThreadId = data.threadId;
+      state.chatMessages = [];
+      state.guidanceTaskSummary = null;
+      state.guidancePlanSteps = null;
+      state.guidanceSuggestions = [];
+      if (data.conversations) state.conversations = data.conversations;
+      renderConversationList();
+      renderChat();
+      break;
+    case "CHAT_SWITCHED":
+      state.currentThreadId = data.threadId;
+      state.guidanceTaskSummary = null;
+      state.guidancePlanSteps = null;
+      state.guidanceSuggestions = [];
+      state.chatMessages = (data.messages || []).map((m) => ({
+        text: m.text,
+        sender: m.role === "user" ? "user" : m.role === "system" ? "system" : "ai",
+        timestamp: m.timestamp,
+      }));
+      if (data.conversations) state.conversations = data.conversations;
+      renderConversationList();
+      renderChat();
+      break;
+    case "CHAT_DELETED":
+      if (data.conversations) state.conversations = data.conversations;
+      if (state.currentThreadId === data.threadId) {
+        wsSend({ type: "NEW_CHAT" });
+      } else {
+        renderConversationList();
+      }
+      break;
+    case "CONVERSATIONS_LIST":
+      if (data.conversations) state.conversations = data.conversations;
+      renderConversationList();
+      break;
+
     case "SCREENSHOT":
       // Screenshot received — no mirror panel in new UI, but store for future use
       break;
@@ -367,6 +418,29 @@ function renderModelSelector() {
         <span class="model-option-provider">${escHtml(m.providerName)}</span>
       </button>`).join("")}
     </div>`;
+}
+
+/* ── Render: conversation list ── */
+function renderConversationList() {
+  const convList = $("convList");
+  if (!convList) return;
+  const convs = state.conversations || [];
+  if (convs.length === 0) {
+    convList.innerHTML = "";
+    return;
+  }
+  convList.innerHTML = convs.map((c) => {
+    const active = c.threadId === state.currentThreadId ? " active" : "";
+    const d = new Date(c.lastUpdatedAt);
+    const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return `<div class="conv-item${active}" data-thread-id="${escHtml(c.threadId)}">
+      <div class="conv-item-body">
+        <div class="conv-title">${escHtml(c.preview || "New conversation")}</div>
+        <div class="conv-meta">${time} &middot; ${c.messageCount} msg${c.messageCount !== 1 ? "s" : ""}</div>
+      </div>
+      <button class="conv-delete" data-thread-id="${escHtml(c.threadId)}" title="Delete">&times;</button>
+    </div>`;
+  }).join("");
 }
 
 /* ── Render: chat ── */
@@ -541,7 +615,7 @@ chatMessages.addEventListener("click", (e) => {
   try {
     const sugs = JSON.parse(container.dataset.suggestions.replace(/&#39;/g,"'"));
     const idx  = parseInt(chip.dataset.idx, 10);
-    if (Number.isFinite(idx) && sugs[idx]) wsSend({ type: "CHAT_MESSAGE", text: sugs[idx] });
+    if (Number.isFinite(idx) && sugs[idx]) wsSend({ type: "CHAT_MESSAGE", text: sugs[idx], threadId: state.currentThreadId });
   } catch {}
 });
 
@@ -550,12 +624,35 @@ chatForm.addEventListener("submit", (e) => {
   e.preventDefault();
   const text = chatInput.value.trim();
   if (!text) return;
-  wsSend({ type: "CHAT_MESSAGE", text });
+  wsSend({ type: "CHAT_MESSAGE", text, threadId: state.currentThreadId });
   chatInput.value = "";
   chatSendBtn.disabled = true;
 });
 chatInput.addEventListener("input", () => {
   chatSendBtn.disabled = !state.connected || !chatInput.value.trim() || isBusy();
+});
+
+/* ── New chat button ── */
+$("newChatBtn")?.addEventListener("click", () => {
+  wsSend({ type: "NEW_CHAT" });
+});
+
+/* ── Conversation list clicks ── */
+$("convList")?.addEventListener("click", (e) => {
+  const delBtn = e.target.closest(".conv-delete");
+  if (delBtn) {
+    e.stopPropagation();
+    const tid = delBtn.dataset.threadId;
+    if (tid) wsSend({ type: "DELETE_CHAT", threadId: tid });
+    return;
+  }
+  const item = e.target.closest(".conv-item");
+  if (item) {
+    const tid = item.dataset.threadId;
+    if (tid && tid !== state.currentThreadId) {
+      wsSend({ type: "SWITCH_CHAT", threadId: tid });
+    }
+  }
 });
 
 /* ── Model selector ── */

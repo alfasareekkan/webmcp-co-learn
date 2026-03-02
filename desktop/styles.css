@@ -90,6 +90,52 @@ html, body {
 }
 .lp-name { font-size: 14px; font-weight: 700; white-space: nowrap; }
 
+/* ── Conversation bar ── */
+.conv-bar {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.new-chat-btn {
+  display: flex; align-items: center; justify-content: center; gap: 5px;
+  width: 100%; padding: 7px 10px;
+  background: var(--primary); color: #fff; border: none; border-radius: 8px;
+  font-size: 12px; font-weight: 600; cursor: pointer;
+  transition: background 0.15s;
+}
+.new-chat-btn:hover { background: #7e70f0; }
+.new-chat-icon { font-size: 16px; font-weight: 300; }
+.conv-list {
+  max-height: 140px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 3px;
+}
+.conv-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px; border-radius: 7px;
+  cursor: pointer; transition: background 0.12s;
+  border: 1px solid transparent;
+}
+.conv-item:hover { background: var(--surface-2); }
+.conv-item.active {
+  background: var(--primary-dim); border-color: rgba(108,92,231,0.25);
+}
+.conv-item-body { flex: 1; min-width: 0; }
+.conv-title {
+  font-size: 11.5px; font-weight: 500; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.conv-meta {
+  font-size: 9.5px; color: var(--text-dim); margin-top: 1px;
+}
+.conv-delete {
+  width: 18px; height: 18px; display: flex; align-items: center; justify-content: center;
+  background: none; border: none; color: var(--text-dim); border-radius: 4px;
+  font-size: 14px; cursor: pointer; flex-shrink: 0;
+  opacity: 0; transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+.conv-item:hover .conv-delete { opacity: 1; }
+.conv-delete:hover { background: rgba(255,118,117,0.15); color: var(--danger); }
+
 /* Chat messages — fills remaining left panel height */
 .chat-messages {
   flex: 1;

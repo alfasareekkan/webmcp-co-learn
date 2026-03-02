@@ -3,7 +3,7 @@ import express from "express";
 import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import cors from "cors";
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+import { HumanMessage, SystemMessage, AIMessage } from "@langchain/core/messages";
 import { annotateScreenshot } from "./annotate.js";
 import { createBrowserAgent, runBrowserAgent, classifyIntent } from "./agent.js";
 import { createChatModel, getAvailableProviders, getDefaultModel, getGuidanceModel } from "./models.js";
@@ -61,6 +61,87 @@ let activeChatAbort = null;
 
 // Last page context per threadId (for multi-step guidance session)
 const sessionContextMap = new Map();
+
+// ---------------------------------------------------------------------------
+// Conversation history store (in-memory, resets on server restart)
+// ---------------------------------------------------------------------------
+const conversations = new Map();
+const MAX_MESSAGES_PER_CONV = 50;
+const HISTORY_CONTEXT_WINDOW = 20;
+
+function getOrCreateConversation(threadId) {
+  if (!conversations.has(threadId)) {
+    conversations.set(threadId, {
+      threadId,
+      messages: [],
+      createdAt: Date.now(),
+      lastUpdatedAt: Date.now(),
+    });
+  }
+  return conversations.get(threadId);
+}
+
+function addMessageToConversation(threadId, role, text) {
+  const conv = getOrCreateConversation(threadId);
+  conv.messages.push({ role, text, timestamp: Date.now() });
+  if (conv.messages.length > MAX_MESSAGES_PER_CONV) conv.messages.shift();
+  conv.lastUpdatedAt = Date.now();
+}
+
+function getConversationHistory(threadId, limit = HISTORY_CONTEXT_WINDOW) {
+  const conv = conversations.get(threadId);
+  if (!conv) return [];
+  return conv.messages.slice(Math.max(0, conv.messages.length - limit));
+}
+
+function createNewConversation() {
+  const threadId = `thread_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+  getOrCreateConversation(threadId);
+  return threadId;
+}
+
+function listConversations() {
+  return Array.from(conversations.values())
+    .sort((a, b) => b.lastUpdatedAt - a.lastUpdatedAt)
+    .map((c) => ({
+      threadId: c.threadId,
+      createdAt: c.createdAt,
+      lastUpdatedAt: c.lastUpdatedAt,
+      messageCount: c.messages.length,
+      preview: c.messages.length > 0
+        ? (c.messages.find(m => m.role === "user")?.text || c.messages[0].text || "").slice(0, 60)
+        : "New conversation",
+    }));
+}
+
+function deleteConversation(threadId) {
+  conversations.delete(threadId);
+  sessionContextMap.delete(threadId);
+}
+
+/** Build a LangChain message array from conversation history + current message */
+function buildMessagesWithHistory(threadId, currentText, systemPrompt) {
+  const msgs = [new SystemMessage(systemPrompt)];
+  const history = getConversationHistory(threadId);
+
+  // Simple token estimation: ~4 chars per token, keep under ~6000 tokens for history
+  let tokenBudget = 6000;
+  const historyMsgs = [];
+  for (let i = history.length - 1; i >= 0; i--) {
+    const est = Math.ceil(history[i].text.length / 4);
+    if (tokenBudget - est < 0) break;
+    tokenBudget -= est;
+    historyMsgs.unshift(history[i]);
+  }
+
+  for (const m of historyMsgs) {
+    if (m.role === "user") msgs.push(new HumanMessage(m.text));
+    else if (m.role === "ai") msgs.push(new AIMessage(m.text));
+  }
+
+  msgs.push(new HumanMessage(currentText));
+  return msgs;
+}
 
 function pushEvent(event) {
   recentEvents.push(event);
@@ -641,6 +722,7 @@ wss.on("connection", (ws, req) => {
       activeAgentModel,
       activeGuidanceModel,
       webmcp: latestWebMCP,
+      conversations: listConversations(),
     }));
   }
 
@@ -773,8 +855,52 @@ wss.on("connection", (ws, req) => {
         break;
       }
 
+      case "NEW_CHAT": {
+        const newThreadId = createNewConversation();
+        console.log(`[Chat] New conversation created: ${newThreadId}`);
+        broadcast("dashboard", {
+          type: "NEW_CHAT_CREATED",
+          threadId: newThreadId,
+          conversations: listConversations(),
+        });
+        break;
+      }
+
+      case "SWITCH_CHAT": {
+        const conv = conversations.get(msg.threadId);
+        if (conv) {
+          console.log(`[Chat] Switching to conversation: ${msg.threadId}`);
+          broadcast("dashboard", {
+            type: "CHAT_SWITCHED",
+            threadId: msg.threadId,
+            messages: conv.messages,
+            conversations: listConversations(),
+          });
+        }
+        break;
+      }
+
+      case "DELETE_CHAT": {
+        console.log(`[Chat] Deleting conversation: ${msg.threadId}`);
+        deleteConversation(msg.threadId);
+        broadcast("dashboard", {
+          type: "CHAT_DELETED",
+          threadId: msg.threadId,
+          conversations: listConversations(),
+        });
+        break;
+      }
+
+      case "LIST_CHATS": {
+        ws.send(JSON.stringify({
+          type: "CONVERSATIONS_LIST",
+          conversations: listConversations(),
+        }));
+        break;
+      }
+
       case "CHAT_MESSAGE": {
-        handleChatMessage(msg.text, ws);
+        handleChatMessage(msg.text, ws, msg.threadId || null);
         break;
       }
 
@@ -1307,8 +1433,8 @@ function handleStopChat() {
   });
 }
 
-async function handleChatMessage(text, senderWs) {
-  const threadId = "default";
+async function handleChatMessage(text, senderWs, incomingThreadId = null) {
+  const threadId = incomingThreadId || createNewConversation();
   const resolvedText = resolveMessage(threadId, text);
   if (resolvedText !== text) {
     console.log(`[SESSION] Resolved message to suggestion: "${resolvedText.slice(0, 50)}"`);
@@ -1322,9 +1448,10 @@ async function handleChatMessage(text, senderWs) {
     broadcast("dashboard", { type: "GUIDANCE_ABANDONED", reason: "New message started" });
   }
 
-  const userMsg = { type: "CHAT_MESSAGE", text: resolvedText, sender: "user", timestamp: Date.now() };
+  const userMsg = { type: "CHAT_MESSAGE", text: resolvedText, sender: "user", timestamp: Date.now(), threadId };
   pushEvent(userMsg);
   broadcast("dashboard", userMsg);
+  addMessageToConversation(threadId, "user", resolvedText);
 
   // Cancel any previous in-flight request
   if (activeChatAbort) activeChatAbort.abort();
@@ -1379,17 +1506,17 @@ async function handleChatMessage(text, senderWs) {
         await handleAgentAction(resolvedText, abort.signal);
       } else {
         console.log(`\x1b[32m[Chat] → Agent unavailable, falling back to \x1b[1mChat mode\x1b[0m`);
-        await handleNormalChat(resolvedText, pageContext, abort.signal);
+        await handleNormalChat(resolvedText, pageContext, abort.signal, threadId);
       }
       break;
     case "guidance":
       console.log(`\x1b[32m[Chat] → Routing to \x1b[1mGuidance AI\x1b[0m\x1b[32m (screenshot + context analysis)\x1b[0m`);
-      await handleGuidanceChat(resolvedText, pageContext, abort.signal);
+      await handleGuidanceChat(resolvedText, pageContext, abort.signal, threadId);
       break;
     case "chat":
     default:
       console.log(`\x1b[32m[Chat] → Routing to \x1b[1mNormal Chat\x1b[0m`);
-      await handleNormalChat(resolvedText, pageContext, abort.signal);
+      await handleNormalChat(resolvedText, pageContext, abort.signal, threadId);
       break;
   }
 }
@@ -1397,8 +1524,7 @@ async function handleChatMessage(text, senderWs) {
 // ---------------------------------------------------------------------------
 // GUIDANCE mode — multi-step session
 // ---------------------------------------------------------------------------
-async function handleGuidanceChat(text, prefetchedContext = null, signal = null) {
-  const threadId = "default";
+async function handleGuidanceChat(text, prefetchedContext = null, signal = null, threadId = "default") {
   broadcast("dashboard", { type: "AI_THINKING", thinking: true });
 
   try {
@@ -1429,6 +1555,10 @@ async function handleGuidanceChat(text, prefetchedContext = null, signal = null)
       });
       return;
     }
+
+    // Store guidance plan in conversation history so future messages have context
+    const planSummary = `[Guidance started] ${plan.taskSummary}\nSteps: ${plan.steps.map((s, i) => `${i+1}. ${s.instruction}`).join("; ")}`;
+    addMessageToConversation(threadId, "ai", planSummary);
 
     sessionManager.createSession(threadId, text, plan);
     sessionContextMap.set(threadId, context);
@@ -1462,7 +1592,7 @@ async function handleGuidanceChat(text, prefetchedContext = null, signal = null)
 // ---------------------------------------------------------------------------
 const CHAT_SYSTEM_PROMPT = `You are CoLearn Assistant — a helpful, friendly AI assistant. Answer questions, have conversations, explain concepts, and help with anything the user asks. Be concise and clear. Use **bold** for emphasis when helpful. You can use markdown-style formatting.`;
 
-async function handleNormalChat(text, prefetchedContext = null, signal = null) {
+async function handleNormalChat(text, prefetchedContext = null, signal = null, threadId = "default") {
   broadcast("dashboard", { type: "AI_THINKING", thinking: true });
 
   try {
@@ -1475,14 +1605,17 @@ async function handleNormalChat(text, prefetchedContext = null, signal = null) {
     }
 
     const model = createChatModel(activeGuidanceModel.provider, activeGuidanceModel.model);
-    const result = await model.invoke([
-      new SystemMessage(CHAT_SYSTEM_PROMPT),
-      new HumanMessage(text),
-    ]);
+
+    // Build message array with conversation history for context
+    const messages = buildMessagesWithHistory(threadId, text, CHAT_SYSTEM_PROMPT);
+    const result = await model.invoke(messages);
 
     if (signal?.aborted) return;
 
     const raw = typeof result.content === "string" ? result.content : JSON.stringify(result.content);
+
+    // Store AI response in conversation history
+    addMessageToConversation(threadId, "ai", raw);
 
     const aiMsg = {
       type: "CHAT_MESSAGE", text: raw, sender: "ai", timestamp: Date.now(),
