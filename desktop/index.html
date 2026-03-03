@@ -39,6 +39,38 @@
         <div class="conv-list" id="convList"></div>
       </div>
 
+      <!-- API config strip — compact bar just above chat -->
+      <div class="api-strip" id="apiStrip">
+        <div class="api-strip-indicators" id="apiStripIndicators">
+          <span class="api-dot" id="apiDotGemini"    title="Gemini API key">G</span>
+          <span class="api-dot" id="apiDotOpenAI"    title="OpenAI API key">O</span>
+          <span class="api-dot" id="apiDotAnthropic" title="Anthropic API key">A</span>
+        </div>
+        <button class="api-strip-btn" id="apiStripBtn" title="Manage API keys">⚙ API Keys</button>
+      </div>
+
+      <!-- API settings drawer (shown/hidden) -->
+      <div class="api-drawer" id="apiDrawer" style="display:none">
+        <div class="api-drawer-head">
+          <span>API Keys</span>
+          <button class="api-drawer-close" id="apiDrawerClose">✕</button>
+        </div>
+        <p class="api-drawer-hint">Add at least one key to enable AI features.</p>
+        <div class="api-drawer-field">
+          <label>Gemini (Google)</label>
+          <input type="password" id="apiInputGemini" placeholder="AIza…" autocomplete="off" />
+        </div>
+        <div class="api-drawer-field">
+          <label>OpenAI</label>
+          <input type="password" id="apiInputOpenAI" placeholder="sk-…" autocomplete="off" />
+        </div>
+        <div class="api-drawer-field">
+          <label>Anthropic (Claude)</label>
+          <input type="password" id="apiInputAnthropic" placeholder="sk-ant-…" autocomplete="off" />
+        </div>
+        <button class="api-drawer-save" id="apiDrawerSave">Save Keys</button>
+      </div>
+
       <!-- Chat messages — takes all remaining height -->
       <div class="chat-messages" id="chatMessages">
         <div class="chat-empty" id="chatEmpty">

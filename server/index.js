@@ -1560,6 +1560,15 @@ async function handleGuidanceChat(text, prefetchedContext = null, signal = null,
     const planSummary = `[Guidance started] ${plan.taskSummary}\nSteps: ${plan.steps.map((s, i) => `${i+1}. ${s.instruction}`).join("; ")}`;
     addMessageToConversation(threadId, "ai", planSummary);
 
+    // ── Send all steps as a readable chat message BEFORE starting guidance ──
+    const stepsText = plan.steps.map((s, i) => `${i + 1}. ${s.instruction}`).join("\n");
+    broadcast("dashboard", {
+      type: "CHAT_MESSAGE",
+      text: `**${plan.taskSummary}**\n\nHere's what we'll do:\n\n${stepsText}\n\n▶ Starting guidance — follow the highlights on the page.`,
+      sender: "ai",
+      timestamp: Date.now(),
+    });
+
     sessionManager.createSession(threadId, text, plan);
     sessionContextMap.set(threadId, context);
 

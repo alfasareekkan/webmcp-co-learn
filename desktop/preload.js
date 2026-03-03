@@ -30,4 +30,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   gatherContext:  ()       => ipcRenderer.invoke('cdp:gatherContext'),
   executeAction:  (action) => ipcRenderer.invoke('cdp:executeAction', action),
   showGuidance:   (msg)    => ipcRenderer.invoke('cdp:showGuidance', msg),
+
+  // ── API Key management ──
+  getApiKeys:  ()        => ipcRenderer.invoke('apikeys:get'),
+  saveApiKeys: (keys)    => ipcRenderer.invoke('apikeys:save', keys),
 });

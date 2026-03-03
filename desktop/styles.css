@@ -819,3 +819,95 @@ body.popup-mode { background: transparent !important; }
 .plan-step-completed .plan-step-text {
   text-decoration: line-through; opacity: 0.6;
 }
+
+/* ═══════════════════════════════════════════════════════════
+   API CONFIG STRIP + DRAWER
+   ═══════════════════════════════════════════════════════════ */
+
+/* Compact strip bar above chat messages */
+.api-strip {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 12px 5px 10px;
+  background: rgba(255,255,255,0.03);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.api-strip-indicators {
+  display: flex; gap: 5px; flex: 1;
+}
+.api-dot {
+  width: 22px; height: 22px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px; font-weight: 700; letter-spacing: 0;
+  /* default = no key */
+  background: rgba(255,255,255,0.06);
+  border: 1.5px solid rgba(255,255,255,0.1);
+  color: var(--text-dim);
+  transition: background 0.2s, border-color 0.2s, color 0.2s;
+  cursor: default; user-select: none;
+}
+.api-dot.has-key {
+  background: rgba(0,200,110,0.15);
+  border-color: rgba(0,200,110,0.5);
+  color: #00c86e;
+}
+.api-strip-btn {
+  font-size: 10.5px; font-weight: 600; padding: 3px 9px; border-radius: 6px;
+  background: rgba(108,92,231,0.12); border: 1px solid rgba(108,92,231,0.3);
+  color: var(--primary); cursor: pointer; transition: background 0.15s;
+  white-space: nowrap;
+}
+.api-strip-btn:hover { background: rgba(108,92,231,0.22); }
+
+/* Inline drawer that expands below the strip */
+.api-drawer {
+  flex-shrink: 0;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 14px 14px;
+  animation: fadeIn 0.18s ease;
+}
+.api-drawer-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
+}
+.api-drawer-head span {
+  font-size: 12px; font-weight: 700; color: var(--text);
+  text-transform: uppercase; letter-spacing: 0.4px;
+}
+.api-drawer-close {
+  background: none; border: none; color: var(--text-dim);
+  font-size: 14px; cursor: pointer; padding: 0 2px;
+  transition: color 0.15s;
+}
+.api-drawer-close:hover { color: var(--text); }
+.api-drawer-hint {
+  font-size: 11px; color: var(--text-dim); margin: 0 0 10px;
+}
+.api-drawer-field {
+  margin-bottom: 8px;
+}
+.api-drawer-field label {
+  display: block; font-size: 10.5px; font-weight: 600;
+  color: var(--text-dim); margin-bottom: 3px; text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.api-drawer-field input {
+  width: 100%; box-sizing: border-box;
+  background: rgba(255,255,255,0.06); border: 1px solid var(--border);
+  border-radius: 6px; color: var(--text); font-size: 11.5px;
+  padding: 6px 9px; outline: none;
+  transition: border-color 0.15s;
+}
+.api-drawer-field input:focus { border-color: var(--primary); }
+.api-drawer-save {
+  width: 100%; margin-top: 4px;
+  background: var(--primary); color: #fff;
+  border: none; border-radius: 7px;
+  font-size: 12px; font-weight: 600; padding: 7px;
+  cursor: pointer; transition: opacity 0.15s;
+}
+.api-drawer-save:hover { opacity: 0.88; }
+.api-drawer-save.saved {
+  background: #00c86e;
+}

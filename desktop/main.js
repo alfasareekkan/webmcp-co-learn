@@ -2,7 +2,22 @@
 
 const { app, BrowserWindow, ipcMain, screen } = require('electron');
 const path = require('path');
+const fs   = require('fs');
 const { initExtension, attachBrowserView, registerIpc } = require('./browserManager');
+
+// ── API Key persistent storage ────────────────────────────────────────────────
+function getKeysPath() {
+  return path.join(app.getPath('userData'), 'colearn-keys.json');
+}
+function readStoredKeys() {
+  try { return JSON.parse(fs.readFileSync(getKeysPath(), 'utf8')); }
+  catch { return {}; }
+}
+function writeStoredKeys(keys) {
+  fs.writeFileSync(getKeysPath(), JSON.stringify(keys, null, 2), 'utf8');
+}
+ipcMain.handle('apikeys:get',  ()        => readStoredKeys());
+ipcMain.handle('apikeys:save', (_, keys) => { writeStoredKeys(keys); return { ok: true }; });
 
 // ── Single-instance lock ──────────────────────────────────────────────────────
 const gotLock = app.requestSingleInstanceLock();

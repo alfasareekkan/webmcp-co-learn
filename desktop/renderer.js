@@ -860,6 +860,107 @@ function desktopWsConnect() {
   };
 }
 
+/* ═══════════════════════════════════════════════════════════
+   API KEY STRIP — compact bar above chat
+   ═══════════════════════════════════════════════════════════ */
+
+(function initApiStrip() {
+  const strip        = document.getElementById('apiStrip');
+  const drawer       = document.getElementById('apiDrawer');
+  const stripBtn     = document.getElementById('apiStripBtn');
+  const drawerClose  = document.getElementById('apiDrawerClose');
+  const drawerSave   = document.getElementById('apiDrawerSave');
+  const inputGemini  = document.getElementById('apiInputGemini');
+  const inputOpenAI  = document.getElementById('apiInputOpenAI');
+  const inputAnthropic = document.getElementById('apiInputAnthropic');
+  const dotGemini    = document.getElementById('apiDotGemini');
+  const dotOpenAI    = document.getElementById('apiDotOpenAI');
+  const dotAnthropic = document.getElementById('apiDotAnthropic');
+
+  if (!strip) return; // popup.html doesn't have the strip
+
+  // Update the coloured indicator dots
+  function refreshDots(keys = {}) {
+    dotGemini.classList.toggle('has-key',    !!keys.gemini);
+    dotOpenAI.classList.toggle('has-key',    !!keys.openai);
+    dotAnthropic.classList.toggle('has-key', !!keys.anthropic);
+  }
+
+  // Open drawer and pre-fill inputs with stored keys (show masked value so user
+  // knows a key exists without exposing it)
+  async function openDrawer() {
+    const keys = await window.electronAPI.getApiKeys().catch(() => ({}));
+    inputGemini.value    = keys.gemini    ? '••••••••' : '';
+    inputOpenAI.value    = keys.openai    ? '••••••••' : '';
+    inputAnthropic.value = keys.anthropic ? '••••••••' : '';
+    drawer.style.display = 'block';
+    stripBtn.textContent = '✕ Close';
+  }
+
+  function closeDrawer() {
+    drawer.style.display = 'none';
+    stripBtn.textContent = '⚙ API Keys';
+  }
+
+  // Load keys on startup and refresh dots
+  async function loadAndRefresh() {
+    if (!window.electronAPI?.getApiKeys) return;
+    const keys = await window.electronAPI.getApiKeys().catch(() => ({}));
+    refreshDots(keys);
+
+    // If no keys are set, auto-open the drawer with a hint
+    const hasAny = keys.gemini || keys.openai || keys.anthropic;
+    if (!hasAny) openDrawer();
+  }
+
+  stripBtn.addEventListener('click', () => {
+    if (drawer.style.display === 'none') openDrawer();
+    else closeDrawer();
+  });
+
+  drawerClose.addEventListener('click', closeDrawer);
+
+  drawerSave.addEventListener('click', async () => {
+    // Read current stored keys so we don't accidentally wipe a field the user
+    // left at the placeholder "••••••••"
+    const existing = await window.electronAPI.getApiKeys().catch(() => ({}));
+
+    const MASK = '••••••••';
+    const merged = {
+      gemini:    inputGemini.value    && inputGemini.value    !== MASK ? inputGemini.value.trim()    : (existing.gemini    || ''),
+      openai:    inputOpenAI.value    && inputOpenAI.value    !== MASK ? inputOpenAI.value.trim()    : (existing.openai    || ''),
+      anthropic: inputAnthropic.value && inputAnthropic.value !== MASK ? inputAnthropic.value.trim() : (existing.anthropic || ''),
+    };
+    // Remove empty keys
+    Object.keys(merged).forEach(k => { if (!merged[k]) delete merged[k]; });
+
+    await window.electronAPI.saveApiKeys(merged).catch(console.error);
+    refreshDots(merged);
+
+    // Push to running server so it picks up the new keys immediately
+    if (state.ws?.readyState === WebSocket.OPEN) {
+      state.ws.send(JSON.stringify({
+        type: 'UPDATE_API_KEYS',
+        gemini:    merged.gemini    || null,
+        openai:    merged.openai    || null,
+        anthropic: merged.anthropic || null,
+      }));
+    }
+
+    // Visual feedback
+    drawerSave.textContent = '✓ Saved';
+    drawerSave.classList.add('saved');
+    setTimeout(() => {
+      drawerSave.textContent = 'Save Keys';
+      drawerSave.classList.remove('saved');
+      closeDrawer();
+    }, 1200);
+  });
+
+  // Run on page load
+  loadAndRefresh();
+})();
+
 /* ── Init ── */
 wsConnect();
 desktopWsConnect();
