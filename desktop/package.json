@@ -5,9 +5,60 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dev": "electron ."
+    "dev": "electron .",
+    "pack": "electron-builder --dir",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "build": {
+    "appId": "com.colearn.desktop",
+    "productName": "CoLearn",
+    "copyright": "Copyright © 2024 CoLearn",
+    "files": [
+      "**/*",
+      "!**/*.map",
+      "!**/node_modules/.cache/**",
+      "!**/.DS_Store"
+    ],
+    "extraResources": [
+      {
+        "from": "../Co-extension",
+        "to": "Co-extension",
+        "filter": ["**/*", "!**/.env", "!**/*.map"]
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "icon": "build/icon.icns",
+      "target": [
+        { "target": "dmg", "arch": ["arm64", "x64"] },
+        { "target": "zip", "arch": ["arm64", "x64"] }
+      ]
+    },
+    "dmg": {
+      "title": "${productName} ${version}",
+      "window": { "width": 540, "height": 380 }
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "publish": null
   },
   "devDependencies": {
-    "electron": "33.4.0"
+    "electron": "33.4.0",
+    "electron-builder": "^26.0.0"
   }
 }

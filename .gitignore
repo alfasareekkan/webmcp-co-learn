@@ -1,9 +1,17 @@
 node_modules/
 dist/
+desktop/dist/
+desktop/build/
+
 .env
 .env.example
+
 *.log
+*.dmg
+*.blockmap
+
 .DS_Store
 .cursor/
 .qodo/
+
 WebMCP Early Preview.docx

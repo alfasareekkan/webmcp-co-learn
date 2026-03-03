@@ -972,10 +972,15 @@ wss.on("connection", (ws, req) => {
         await saveApiKeys({ gemini, openai, anthropic });
 
         // Refresh provider / model selections
-        availableProviders = getAvailableProviders();
-        aiEnabled          = availableProviders.length > 0;
-        activeAgentModel   = getDefaultModel();
+        availableProviders  = getAvailableProviders();
+        aiEnabled           = availableProviders.length > 0;
+        activeAgentModel    = getDefaultModel();
         activeGuidanceModel = getGuidanceModel();
+
+        // Rebuild the browser agent with the new model (was null when no keys existed)
+        browserAgent = buildBrowserAgent(activeAgentModel);
+        if (browserAgent) console.log("[Agent] Browser agent (re)initialised with", activeAgentModel?.provider, activeAgentModel?.model);
+        else              console.warn("[Agent] Could not build agent — model may be unavailable");
 
         broadcast("dashboard", {
           type: "PROVIDERS_UPDATED",

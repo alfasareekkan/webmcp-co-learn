@@ -23,7 +23,7 @@
 
 'use strict';
 
-const { BrowserWindow, WebContentsView, session, ipcMain } = require('electron');
+const { app, BrowserWindow, WebContentsView, session, ipcMain } = require('electron');
 const path = require('path');
 const http = require('http');
 
@@ -82,7 +82,7 @@ let _overlayScriptCache = null;
 function getOverlayScript() {
   if (_overlayScriptCache) return _overlayScriptCache;
   try {
-    const overlayPath = path.resolve(__dirname, '../Co-extension/overlay.js');
+    const overlayPath = path.join(EXT_PATH, 'overlay.js');
     _overlayScriptCache = fs.readFileSync(overlayPath, 'utf8');
   } catch (err) {
     console.error('[Browser] Failed to read overlay.js:', err.message);
@@ -103,7 +103,11 @@ async function injectOverlayScript(wc) {
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const EXT_PATH   = path.resolve(__dirname, '../Co-extension');
+// When packaged, Co-extension lives in Resources/ next to app.asar.
+// In development it's one level up from the desktop/ folder.
+const EXT_PATH = app.isPackaged
+  ? path.join(process.resourcesPath, 'Co-extension')
+  : path.resolve(__dirname, '../Co-extension');
 const EXT_SES    = 'persist:colearn-browser';
 const HEALTH_URL = 'https://webmcp-co-learn-production.up.railway.app/api/health';
 const POLL_MS    = 800;
