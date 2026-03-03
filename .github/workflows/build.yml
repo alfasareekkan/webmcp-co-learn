@@ -8,37 +8,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  # ── macOS DMG (arm64 + x64) ────────────────────────────────────────────────
-  build-mac:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: desktop/package.json
-
-      - name: Install desktop dependencies
-        run: npm install
-        working-directory: desktop
-
-      - name: Build macOS DMG
-        run: npm run dist:mac
-        working-directory: desktop
-        env:
-          # Needed to skip code-signing in CI (no Apple certificate)
-          CSC_IDENTITY_AUTO_DISCOVERY: false
-
-      - name: Upload macOS artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: CoLearn-macOS
-          path: |
-            desktop/dist/*.dmg
-            desktop/dist/*.zip
-          retention-days: 30
 
   # ── Windows NSIS installer ─────────────────────────────────────────────────
   build-windows:
