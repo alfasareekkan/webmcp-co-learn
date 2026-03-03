@@ -6,7 +6,9 @@
   "use strict";
 
   // Don't observe our own dashboard
-  if (location.host === "localhost:5173") return;
+  const _DASHBOARD_HOST = (typeof COLEARN_CONFIG !== "undefined")
+    ? COLEARN_CONFIG.dashboardHost : "localhost:5173";
+  if (location.host === _DASHBOARD_HOST) return;
   // Guard against double-injection when scripts are injected programmatically
   if (window.__colearn_content_injected__) return;
   window.__colearn_content_injected__ = true;

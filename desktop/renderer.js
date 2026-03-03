@@ -72,7 +72,7 @@ const bDev         = $("bDev");
 const extDot       = $("extDot");
 
 /* ── WebSocket ── */
-const WS_URL = "ws://localhost:3001?role=dashboard";
+const WS_URL = "wss://webmcp-co-learn-production.up.railway.app?role=dashboard";
 let reconnectTimer = null;
 
 function wsConnect() {
@@ -819,7 +819,7 @@ let desktopWs = null;
 
 function desktopWsConnect() {
   if (desktopWs?.readyState === WebSocket.OPEN) return;
-  desktopWs = new WebSocket('ws://localhost:3001?role=desktop');
+  desktopWs = new WebSocket('wss://webmcp-co-learn-production.up.railway.app?role=desktop');
 
   desktopWs.onopen = () => console.log('[Desktop] CDP bridge connected');
 
