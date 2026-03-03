@@ -196,10 +196,6 @@
   transition: max-height 0.3s ease;
 }
 
-.annotated-image.expanded {
-  max-height: none;
-}
-
 .image-hint {
   text-align: center;
   font-size: 10px;
@@ -799,4 +795,147 @@
   color: var(--text-dim);
   min-width: 50px;
   text-align: right;
+}
+
+/* --- Image Modal --- */
+
+.image-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 0.2s ease;
+  cursor: pointer;
+}
+
+.image-modal-content {
+  position: relative;
+  max-width: 92vw;
+  max-height: 92vh;
+  cursor: default;
+}
+
+.image-modal-img {
+  max-width: 92vw;
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: 10px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.6);
+}
+
+.image-modal-close {
+  position: absolute;
+  top: -12px;
+  right: -12px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+  backdrop-filter: blur(4px);
+}
+
+.image-modal-close:hover {
+  background: rgba(255, 82, 82, 0.6);
+}
+
+/* --- Guidance Plan Card --- */
+
+.guidance-plan-card {
+  background: rgba(108, 92, 231, 0.06);
+  border: 1px solid rgba(108, 92, 231, 0.2);
+  border-radius: 12px;
+  padding: 12px 14px;
+  animation: fadeIn 0.25s ease;
+}
+
+.plan-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.plan-card-icon {
+  font-size: 16px;
+}
+
+.plan-card-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--primary);
+  flex: 1;
+}
+
+.plan-card-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--bg);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.plan-card-steps {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.plan-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  transition: background 0.15s;
+}
+
+.plan-step-indicator {
+  flex-shrink: 0;
+  font-size: 13px;
+  width: 20px;
+  text-align: center;
+}
+
+.plan-step-text {
+  flex: 1;
+  color: var(--text);
+}
+
+.plan-step-pending .plan-step-text {
+  color: var(--text-dim);
+}
+
+.plan-step-active {
+  background: rgba(108, 92, 231, 0.1);
+  border-left: 2px solid var(--primary);
+}
+
+.plan-step-active .plan-step-text {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.plan-step-completed .plan-step-text {
+  text-decoration: line-through;
+  opacity: 0.6;
 }

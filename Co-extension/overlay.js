@@ -441,10 +441,21 @@
   }
 
   // ---- Element bounds ----
+  // Prefer live DOM lookup via selector for accurate viewport-relative positions.
+  // Falls back to the cached bounds from the server (which may be stale if the
+  // user scrolled or the layout changed since context was gathered).
   function getElementBounds(guide) {
     if (guide.selector) {
-      const el = document.querySelector(guide.selector);
-      if (el) return el.getBoundingClientRect();
+      try {
+        const el = document.querySelector(guide.selector);
+        if (el) {
+          const rect = el.getBoundingClientRect();
+          // Verify the element is visible (non-zero dimensions)
+          if (rect.width > 0 && rect.height > 0) return rect;
+        }
+      } catch (e) {
+        // Invalid selector — fall through to bounds
+      }
     }
     return guide.bounds || null;
   }
@@ -725,6 +736,31 @@
       );
       showStep(currentGuides, msg.step ?? 0);
       sendResponse({ ok: true });
+    }
+  });
+
+  // ---- Custom event bridge for Electron (desktop CDP path) ----
+  // In Electron, chrome.tabs.sendMessage from background → content is unreliable.
+  // The desktop injects guidance via wc.executeJavaScript → dispatchEvent instead.
+  window.addEventListener("__colearn_guidance__", (e) => {
+    const msg = e.detail;
+    if (!msg) return;
+    if (msg.type === "SHOW_GUIDANCE") {
+      showAllGuides(msg.guides || []);
+    } else if (msg.type === "CLEAR_GUIDANCE") {
+      removeOverlay();
+    } else if (msg.type === "STEP_GUIDANCE") {
+      if (msg.stepNumber != null) currentStepInfo.stepNumber = msg.stepNumber;
+      if (msg.totalSteps != null) currentStepInfo.totalSteps = msg.totalSteps;
+      if (msg.instruction != null) currentStepInfo.instruction = msg.instruction;
+      if (msg.taskSummary != null) currentStepInfo.taskSummary = msg.taskSummary;
+      renderProgressPanel(
+        currentStepInfo.stepNumber,
+        currentStepInfo.totalSteps,
+        currentStepInfo.instruction,
+        currentStepInfo.taskSummary
+      );
+      showStep(currentGuides, msg.step ?? 0);
     }
   });
 

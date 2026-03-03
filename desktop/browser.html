@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <!--
+    CSP for the browser toolbar (browser.html).
+    Note: web content is in a separate WebContentsView with its own CSP.
+    We allow https: images for tab favicons.
+  -->
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: blob:;" />
+  <title>CoLearn Browser</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0f1012;
+      --surface:  #1a1b1e;
+      --border:   #2a2b30;
+      --text:     #e8e9ed;
+      --muted:    #8a8b90;
+      --accent:   #4f8ef7;
+      --danger:   #ef4444;
+      --success:  #22c55e;
+      --warn:     #f59e0b;
+      --tab-h:    36px;
+      --nav-h:    48px;
+      --radius:   6px;
+    }
+
+    html, body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      user-select: none;
+    }
+
+    /* ── Tab Bar ─────────────────────────────────────────────────── */
+    .tab-bar {
+      display: flex;
+      align-items: flex-end;
+      height: var(--tab-h);
+      background: var(--bg);
+      padding: 0 4px;
+      padding-left: 80px; /* leave room for macOS traffic lights */
+      -webkit-app-region: drag; /* allow dragging from empty tab bar area */
+      gap: 2px;
+    }
+
+    .tab-list {
+      display: flex;
+      align-items: flex-end;
+      gap: 2px;
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      -webkit-app-region: no-drag;
+    }
+
+    .tab-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      height: 30px;
+      min-width: 80px;
+      max-width: 200px;
+      padding: 0 8px;
+      border-radius: var(--radius) var(--radius) 0 0;
+      background: transparent;
+      border: 1px solid transparent;
+      border-bottom: none;
+      cursor: pointer;
+      transition: background 0.1s;
+      flex-shrink: 1;
+      -webkit-app-region: no-drag;
+    }
+    .tab-item:hover { background: var(--surface); }
+    .tab-item.active {
+      background: var(--surface);
+      border-color: var(--border);
+    }
+
+    .tab-favicon {
+      width: 14px; height: 14px;
+      flex-shrink: 0;
+      border-radius: 2px;
+      object-fit: contain;
+    }
+    .tab-favicon-placeholder {
+      width: 14px; height: 14px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 10px; flex-shrink: 0;
+    }
+
+    .tab-title {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .tab-item.active .tab-title { color: var(--text); }
+
+    .tab-spinner {
+      width: 12px; height: 12px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .tab-close {
+      width: 16px; height: 16px;
+      border: none; background: none;
+      color: var(--muted);
+      cursor: pointer;
+      border-radius: 3px;
+      font-size: 14px;
+      line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      opacity: 0;
+      transition: opacity 0.1s, background 0.1s;
+    }
+    .tab-item:hover .tab-close,
+    .tab-item.active .tab-close { opacity: 1; }
+    .tab-close:hover { background: rgba(255,255,255,0.1); color: var(--text); }
+
+    .new-tab-btn {
+      width: 28px; height: 28px;
+      border: none; background: none;
+      color: var(--muted);
+      font-size: 18px; cursor: pointer;
+      border-radius: var(--radius);
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      -webkit-app-region: no-drag;
+      transition: background 0.1s, color 0.1s;
+    }
+    .new-tab-btn:hover { background: var(--surface); color: var(--text); }
+
+    /* ── Nav Bar ─────────────────────────────────────────────────── */
+    .nav-bar {
+      display: flex;
+      align-items: center;
+      height: var(--nav-h);
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0 10px;
+      gap: 6px;
+    }
+
+    .nav-btn {
+      width: 30px; height: 30px;
+      border: none; background: none;
+      color: var(--muted);
+      cursor: pointer;
+      border-radius: var(--radius);
+      font-size: 16px;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.1s, color 0.1s;
+      flex-shrink: 0;
+    }
+    .nav-btn:hover:not(:disabled) { background: rgba(255,255,255,0.07); color: var(--text); }
+    .nav-btn:disabled { opacity: 0.3; cursor: default; }
+
+    /* URL bar */
+    .url-wrap {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      height: 32px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 0 12px;
+      gap: 6px;
+      transition: border-color 0.1s;
+    }
+    .url-wrap:focus-within { border-color: var(--accent); }
+
+    .url-lock {
+      font-size: 12px;
+      flex-shrink: 0;
+    }
+    .url-lock.secure  { color: var(--muted); }
+    .url-lock.insecure { color: var(--warn); }
+    .url-lock.hidden  { visibility: hidden; }
+
+    .url-input {
+      flex: 1;
+      min-width: 0;
+      border: none;
+      background: none;
+      color: var(--text);
+      font-size: 12.5px;
+      outline: none;
+      font-family: inherit;
+    }
+    .url-input::placeholder { color: var(--muted); }
+    .url-input::selection { background: var(--accent); color: #fff; }
+
+    /* Extension status dot */
+    .ext-status {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      flex-shrink: 0;
+      transition: background 0.3s;
+      cursor: default;
+    }
+    .ext-status.connected   { background: var(--success); }
+    .ext-status.disconnected { background: var(--danger); }
+
+    /* Extension status banner (appears below nav bar when connecting/failed) */
+    .ext-banner {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 12px;
+      font-size: 12px;
+      background: #1e2030;
+      border-bottom: 1px solid var(--border);
+    }
+    .ext-banner.visible { display: flex; }
+    .ext-banner.warning { background: #2a1f10; border-color: var(--warn); }
+    .ext-banner-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--accent); animation: pulse 1.2s ease-in-out infinite;
+    }
+    .ext-banner.warning .ext-banner-dot { background: var(--warn); animation: none; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .ext-banner-dismiss {
+      margin-left: auto; border: none; background: none;
+      color: var(--muted); cursor: pointer; font-size: 14px; padding: 0 4px;
+    }
+    .ext-banner-dismiss:hover { color: var(--text); }
+  </style>
+</head>
+<body>
+
+  <!-- ── Tab Bar ─────────────────────────────────────────────────────── -->
+  <div class="tab-bar">
+    <div id="tabList" class="tab-list"></div>
+    <button id="newTabBtn" class="new-tab-btn" title="New tab (Ctrl+T)">+</button>
+  </div>
+
+  <!-- ── Nav Bar ─────────────────────────────────────────────────────── -->
+  <div class="nav-bar">
+    <button id="backBtn"   class="nav-btn" title="Back (Alt+Left)"    disabled>&#8592;</button>
+    <button id="fwdBtn"    class="nav-btn" title="Forward (Alt+Right)" disabled>&#8594;</button>
+    <button id="reloadBtn" class="nav-btn" title="Reload (Ctrl+R)">&#8635;</button>
+
+    <div class="url-wrap">
+      <span id="urlLock" class="url-lock hidden">&#128274;</span>
+      <input id="urlInput" class="url-input"
+        type="text" spellcheck="false" autocomplete="off" autocorrect="off"
+        placeholder="Search or enter URL..." />
+    </div>
+
+    <button id="extBtn" class="nav-btn" title="Open extension popup">&#129513;</button>
+    <button id="devBtn" class="nav-btn" title="Open DevTools" style="font-size:13px">&#9881;</button>
+    <div id="extStatus" class="ext-status" title="Extension: connecting..."></div>
+  </div>
+
+  <!-- ── Extension Status Banner ────────────────────────────────────── -->
+  <div id="extBanner" class="ext-banner">
+    <span class="ext-banner-dot"></span>
+    <span id="extBannerText">Waiting for extension to connect to server...</span>
+    <button class="ext-banner-dismiss" id="extBannerDismiss" title="Dismiss">&#215;</button>
+  </div>
+
+  <script src="browser-renderer.js"></script>
+</body>
+</html>

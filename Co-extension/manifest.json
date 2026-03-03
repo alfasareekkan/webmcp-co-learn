@@ -18,7 +18,8 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js", "overlay.js"]
+      "js": ["content.js", "overlay.js"],
+      "run_at": "document_end"
     }
   ],
 

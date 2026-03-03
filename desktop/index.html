@@ -3,115 +3,181 @@
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy"
-    content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src ws://localhost:3001; img-src 'self' data: blob:;" />
+    content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src ws://localhost:3001; img-src 'self' data: blob: https:;" />
   <title>CoLearn</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <!-- Invisible drag region for macOS traffic lights -->
-  <div class="titlebar-drag"></div>
+  <div class="app" id="app">
 
-  <div class="app-layout" id="app">
-    <!-- Sidebar toggle -->
-    <button class="sidebar-toggle" id="sidebarToggle" title="Toggle sidebar">&#9664;</button>
+    <!-- ══════════════════════════════════════════
+         LEFT PANEL — chat + controls
+    ══════════════════════════════════════════ -->
+    <aside class="lp" id="lp">
 
-    <!-- Sidebar -->
-    <aside class="sidebar" id="sidebar">
-      <div class="sidebar-header">
+      <!-- Header row (macOS traffic lights live over this area) -->
+      <div class="lp-head">
         <div class="logo">CL</div>
-        <h1>CoLearn</h1>
+        <span class="lp-name">CoLearn</span>
         <span class="conn-badge off" id="connBadge">Offline</span>
-      </div>
-      <!-- WebMCP Section -->
-      <div class="sidebar-section-title webmcp-section-title">
-        <span>WebMCP Tools</span>
-        <button class="webmcp-scan-btn" id="webmcpScanBtn" title="Scan current page for WebMCP tools">Scan</button>
-      </div>
-      <div class="webmcp-panel" id="webmcpPanel">
-        <div class="webmcp-status-bar" id="webmcpStatusBar">
-          <span class="webmcp-dot off"></span>
-          <span class="webmcp-status-text">Not scanned</span>
-        </div>
-        <div class="webmcp-tool-list" id="webmcpToolList"></div>
-      </div>
-
-      <div class="sidebar-section-title">Activity Feed</div>
-      <div class="event-list" id="eventList">
-        <div class="empty">Waiting for events...<br><span>Browse other tabs with the extension active</span></div>
-      </div>
-    </aside>
-
-    <!-- Main Content -->
-    <main class="main-content" id="mainContent">
-      <!-- Screen Mirror -->
-      <div class="mirror-container" id="mirrorContainer">
-        <div class="mirror-header">
-          <span class="mirror-title">Screen Mirror</span>
-          <span class="mirror-meta" id="mirrorMeta"></span>
-          <button class="mirror-draw-btn" id="drawBtn" style="display:none">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
-            Draw
+        <span class="thinking-badge" id="thinkingBadge" style="display:none">Thinking…</span>
+        <span class="thinking-badge agent-badge" id="agentBadge" style="display:none">Agent…</span>
+        <div class="model-selector-wrapper" id="modelSelector" style="display:none">
+          <button class="model-selector-btn" id="modelBtn">
+            <span class="model-icon">&#9881;</span>
+            <span class="model-current" id="modelLabel">Model</span>
           </button>
+          <div class="model-dropdown hidden" id="modelDropdown"></div>
         </div>
-        <div class="mirror-viewport" id="mirrorViewport">
-          <div class="mirror-empty">
-            <div class="mirror-icon">&#128421;</div>
-            <p>No screenshot yet</p>
-            <span>Attach the debugger from the extension popup, then click Screenshot</span>
-          </div>
-        </div>
-        <div class="mirror-saved-strip" id="savedStrip" style="display:none"></div>
       </div>
 
-      <!-- Resizer -->
-      <div class="resizer" id="resizer"><div class="resizer-handle"></div></div>
-
-      <!-- Chat Panel -->
-      <div class="chat-panel" id="chatPanel">
-        <div class="chat-header">
-          <div class="chat-header-left">
-            <span class="chat-title">Chat</span>
-            <span class="chat-subtitle">Ask anything or command the agent</span>
-          </div>
-          <div class="chat-header-right">
-            <span class="thinking-badge" id="thinkingBadge" style="display:none">AI thinking...</span>
-            <span class="thinking-badge agent-badge" id="agentBadge" style="display:none">Agent running...</span>
-            <div class="model-selector-wrapper" id="modelSelector" style="display:none">
-              <button class="model-selector-btn" id="modelBtn">
-                <span class="model-icon">&#9881;</span>
-                <span class="model-current" id="modelLabel">Not set</span>
-              </button>
-              <div class="model-dropdown hidden" id="modelDropdown"></div>
-            </div>
-          </div>
-        </div>
-        <div class="chat-messages" id="chatMessages">
-          <div class="chat-empty" id="chatEmpty">
-            <div class="chat-empty-icon">&#129302;</div>
-            <p>Browser Agent + AI Guide</p>
-            <span>
-              <strong>Guide mode:</strong> "Where is the settings button?" "How do I create a new project?"<br>
-              <strong>Agent mode:</strong> "Click the search button" "Type hello in the search box"<br><br>
-              The AI auto-detects your intent — ask questions for guidance, or give commands for actions.
-            </span>
-          </div>
-        </div>
-        <form class="chat-input-bar" id="chatForm">
-          <input type="text" class="chat-input" id="chatInput" placeholder="Connecting..." disabled />
-          <button type="submit" class="chat-send" id="chatSendBtn" disabled>Send</button>
-        </form>
+      <!-- Conversation bar — new chat + conversation list -->
+      <div class="conv-bar" id="convBar">
+        <button class="new-chat-btn" id="newChatBtn" title="Start a new conversation">
+          <span class="new-chat-icon">+</span> New Chat
+        </button>
+        <div class="conv-list" id="convList"></div>
       </div>
-    </main>
-  </div>
 
-  <!-- Drawing overlay (hidden by default) -->
-  <div class="drawing-overlay hidden" id="drawingOverlay">
-    <div class="drawing-toolbar" id="drawingToolbar"></div>
-    <div class="drawing-canvas-container" id="drawingCanvasContainer">
-      <canvas id="drawingBase"></canvas>
-      <canvas id="drawingOverlayCanvas"></canvas>
-    </div>
-  </div>
+      <!-- API config strip — compact bar just above chat -->
+      <div class="api-strip" id="apiStrip">
+        <div class="api-strip-indicators" id="apiStripIndicators">
+          <span class="api-dot" id="apiDotGemini"    title="Gemini API key">G</span>
+          <span class="api-dot" id="apiDotOpenAI"    title="OpenAI API key">O</span>
+          <span class="api-dot" id="apiDotAnthropic" title="Anthropic API key">A</span>
+        </div>
+        <button class="api-strip-btn" id="apiStripBtn" title="Manage API keys">⚙ API Keys</button>
+      </div>
+
+      <!-- API settings drawer (shown/hidden) -->
+      <div class="api-drawer" id="apiDrawer" style="display:none">
+        <div class="api-drawer-head">
+          <span>API Keys</span>
+          <button class="api-drawer-close" id="apiDrawerClose">✕</button>
+        </div>
+        <p class="api-drawer-hint">Add at least one key to enable AI features.</p>
+        <div class="api-drawer-field">
+          <label>Gemini (Google)</label>
+          <input type="password" id="apiInputGemini" placeholder="AIza…" autocomplete="off" />
+        </div>
+        <div class="api-drawer-field">
+          <label>OpenAI</label>
+          <input type="password" id="apiInputOpenAI" placeholder="sk-…" autocomplete="off" />
+        </div>
+        <div class="api-drawer-field">
+          <label>Anthropic (Claude)</label>
+          <input type="password" id="apiInputAnthropic" placeholder="sk-ant-…" autocomplete="off" />
+        </div>
+        <button class="api-drawer-save" id="apiDrawerSave">Save Keys</button>
+      </div>
+
+      <!-- Chat messages — takes all remaining height -->
+      <div class="chat-messages" id="chatMessages">
+        <div class="chat-empty" id="chatEmpty">
+          <div class="chat-empty-icon">&#129302;</div>
+          <p>CoLearn AI</p>
+          <span>
+            <strong>Guide:</strong> "Where is the settings button?"<br>
+            <strong>Agent:</strong> "Click the search bar" "Type hello"<br><br>
+            The browser is live on the right.
+          </span>
+        </div>
+      </div>
+
+      <!-- Collapsible: Activity feed -->
+      <div class="lp-section" id="eventsSection">
+        <div class="lp-section-hd" id="eventsHd">
+          <span>Activity</span>
+          <span class="lp-chev closed" id="eventsChev">&#9656;</span>
+        </div>
+        <div class="event-list lp-section-body" id="eventList" style="display:none">
+          <div class="empty">No events yet…<br><span>Interact with the browser to the right</span></div>
+        </div>
+      </div>
+
+      <!-- Collapsible: WebMCP tools -->
+      <div class="lp-section" id="webmcpSection">
+        <div class="lp-section-hd" id="webmcpHd">
+          <span>WebMCP Tools</span>
+          <button class="webmcp-scan-btn" id="webmcpScanBtn">Scan</button>
+          <span class="lp-chev closed" id="webmcpChev">&#9656;</span>
+        </div>
+        <div class="webmcp-panel lp-section-body" id="webmcpPanel" style="display:none">
+          <div class="webmcp-status-bar" id="webmcpStatusBar">
+            <span class="webmcp-dot off"></span>
+            <span class="webmcp-status-text">Not scanned</span>
+          </div>
+          <div class="webmcp-tool-list" id="webmcpToolList"></div>
+        </div>
+      </div>
+
+      <!-- Chat input -->
+      <form class="chat-input-bar" id="chatForm">
+        <input type="text" class="chat-input" id="chatInput"
+          placeholder="Connecting…" disabled autocomplete="off" />
+        <button type="submit" class="chat-send" id="chatSendBtn" disabled>Send</button>
+      </form>
+
+    </aside><!-- .lp -->
+
+    <!-- ══════════════════════════════════════════
+         DIVIDER — drag to resize panels
+    ══════════════════════════════════════════ -->
+    <div class="split-divider" id="splitDivider"></div>
+
+    <!-- ══════════════════════════════════════════
+         RIGHT PANEL — browser toolbar + content
+    ══════════════════════════════════════════ -->
+    <div class="rp" id="rp">
+
+      <!-- Browser toolbar (height: 80px = 34px tab-bar + 46px nav-bar) -->
+      <div class="btoolbar" id="btoolbar">
+
+        <!-- Tab bar (34px) -->
+        <div class="btab-bar">
+          <div class="btab-list" id="btabList"></div>
+          <button class="btab-new" id="btabNew" title="New tab (Ctrl+T)">+</button>
+        </div>
+
+        <!-- Nav bar (46px) -->
+        <div class="bnav-bar">
+          <button class="bnav-btn" id="bBack"   disabled title="Back (Alt+←)">&#8592;</button>
+          <button class="bnav-btn" id="bFwd"    disabled title="Forward (Alt+→)">&#8594;</button>
+          <button class="bnav-btn" id="bReload" title="Reload (Ctrl+R)">&#8635;</button>
+          <div class="burl-wrap">
+            <span class="burl-lock empty" id="burlLock"></span>
+            <input class="burl-input" id="burlInput" type="text"
+              spellcheck="false" autocomplete="off" placeholder="Search or enter URL…" />
+          </div>
+          <button class="bnav-btn" id="bExt" title="Open extension popup">&#129513;</button>
+          <button class="bnav-btn bdev-btn" id="bDev" title="DevTools">&#9881;</button>
+          <div class="ext-dot" id="extDot" title="Extension: connecting…"></div>
+        </div>
+
+      </div><!-- .btoolbar -->
+
+      <!--
+        The WebContentsView (actual web content) is positioned by the main process
+        starting at (splitX, TOOLBAR_H). This placeholder is visible only while
+        the view is loading or if it hasn't been attached yet.
+      -->
+      <div class="browser-bg" id="browserBg">
+        <div class="browser-bg-inner">
+          <div style="font-size:36px;opacity:0.25;margin-bottom:14px">&#127760;</div>
+          <p>Browser loading…</p>
+          <span>Co-extension connects automatically</span>
+        </div>
+      </div>
+
+    </div><!-- .rp -->
+
+  </div><!-- .app -->
+
+  <!--
+    Full-screen drag capture overlay — shown during panel divider drag so that
+    mouse events aren't swallowed by the WebContentsView underneath.
+  -->
+  <div class="drag-capture" id="dragCapture" style="display:none"></div>
 
   <script src="renderer.js"></script>
 </body>

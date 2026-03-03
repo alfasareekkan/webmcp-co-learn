@@ -1138,44 +1138,46 @@ async function captureScreenshotRaw(tabId) {
 }
 
 // ---------------------------------------------------------------------------
-// CDP — Console & Network observation
+// CDP — Console & Network observation (only when chrome.debugger is available, e.g. Chrome; not in Electron)
 // ---------------------------------------------------------------------------
-chrome.debugger.onEvent.addListener((source, method, params) => {
-  const tabId = source.tabId;
+if (chrome.debugger?.onEvent) {
+  chrome.debugger.onEvent.addListener((source, method, params) => {
+    const tabId = source.tabId;
 
-  if (method === "Console.messageAdded" || method === "Runtime.consoleAPICalled") {
-    if (!state.consoleLogs[tabId]) state.consoleLogs[tabId] = [];
-    const entry = method === "Console.messageAdded"
-      ? { level: params.message?.level, text: params.message?.text?.slice(0, 300) }
-      : { level: params.type, text: params.args?.map(a => a.value ?? a.description ?? "").join(" ").slice(0, 300) };
-    entry.timestamp = Date.now();
-    state.consoleLogs[tabId].push(entry);
-    if (state.consoleLogs[tabId].length > MAX_LOGS) state.consoleLogs[tabId].shift();
-  }
+    if (method === "Console.messageAdded" || method === "Runtime.consoleAPICalled") {
+      if (!state.consoleLogs[tabId]) state.consoleLogs[tabId] = [];
+      const entry = method === "Console.messageAdded"
+        ? { level: params.message?.level, text: params.message?.text?.slice(0, 300) }
+        : { level: params.type, text: params.args?.map(a => a.value ?? a.description ?? "").join(" ").slice(0, 300) };
+      entry.timestamp = Date.now();
+      state.consoleLogs[tabId].push(entry);
+      if (state.consoleLogs[tabId].length > MAX_LOGS) state.consoleLogs[tabId].shift();
+    }
 
-  if (method === "Network.requestWillBeSent") {
-    if (!state.networkLogs[tabId]) state.networkLogs[tabId] = [];
-    state.networkLogs[tabId].push({
-      requestId: params.requestId,
-      url: params.request?.url?.slice(0, 300),
-      method: params.request?.method,
-      type: params.type,
-      timestamp: Date.now(),
-    });
-    if (state.networkLogs[tabId].length > MAX_LOGS) state.networkLogs[tabId].shift();
-  }
+    if (method === "Network.requestWillBeSent") {
+      if (!state.networkLogs[tabId]) state.networkLogs[tabId] = [];
+      state.networkLogs[tabId].push({
+        requestId: params.requestId,
+        url: params.request?.url?.slice(0, 300),
+        method: params.request?.method,
+        type: params.type,
+        timestamp: Date.now(),
+      });
+      if (state.networkLogs[tabId].length > MAX_LOGS) state.networkLogs[tabId].shift();
+    }
 
-  if (method === "Network.responseReceived") {
-    const logs = state.networkLogs[tabId];
-    if (logs) {
-      const entry = logs.find(e => e.requestId === params.requestId);
-      if (entry) {
-        entry.status = params.response?.status;
-        entry.mimeType = params.response?.mimeType;
+    if (method === "Network.responseReceived") {
+      const logs = state.networkLogs[tabId];
+      if (logs) {
+        const entry = logs.find(e => e.requestId === params.requestId);
+        if (entry) {
+          entry.status = params.response?.status;
+          entry.mimeType = params.response?.mimeType;
+        }
       }
     }
-  }
-});
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1209,7 +1211,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     case "CONTENT_READY":
       console.log("[CoLearn] Content script ready:", msg.payload.url);
-      if (tabId) state.pageContexts[tabId] = msg.payload;
+      if (tabId) {
+        state.pageContexts[tabId] = msg.payload;
+        state.activeTabId = tabId; // most reliable source — real Chrome tab ID from sender
+      }
       wsSend(msg);
       break;
 
@@ -1257,13 +1262,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // ---------------------------------------------------------------------------
 // Track active tab
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Track active tab — robust startup for Electron's session.loadExtension()
+// ---------------------------------------------------------------------------
+
 chrome.tabs.onActivated.addListener((activeInfo) => {
   state.activeTabId = activeInfo.tabId;
 });
 
+// Catch tabs created before onActivated fires (Electron initial tab)
+chrome.tabs.onCreated?.addListener((tab) => {
+  if (!state.activeTabId && tab.id) state.activeTabId = tab.id;
+});
+
+// Keep activeTabId current when a tab finishes navigating
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (tab.active && changeInfo.status === 'complete') state.activeTabId = tabId;
+});
+
+// Retry query: extension may start before the WebContentsView tab is registered
+(async function initActiveTab() {
+  for (let i = 0; i < 10; i++) {
+    if (state.activeTabId) return;
+    const tabs = await chrome.tabs.query({ active: true }).catch(() => []);
+    if (tabs[0]?.id) { state.activeTabId = tabs[0].id; return; }
+    await new Promise(r => setTimeout(r, 600));
+  }
+})();
+
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (state.debuggerAttached.has(tabId)) {
-    chrome.debugger.detach({ tabId }).catch(() => {});
+    chrome.debugger?.detach({ tabId }).catch(() => {});
     state.debuggerAttached.delete(tabId);
   }
   delete state.pageContexts[tabId];
@@ -1277,6 +1307,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 async function attachDebugger(tabId) {
   if (!tabId) return { ok: false, error: "No tabId" };
   if (state.debuggerAttached.has(tabId)) return { ok: true, already: true };
+  if (!chrome.debugger) return { ok: false, error: "chrome.debugger not available in this environment (Electron)" };
 
   try {
     await chrome.debugger.attach({ tabId }, "1.3");
@@ -1324,9 +1355,11 @@ async function detachDebugger(tabId) {
   }
 }
 
-chrome.debugger.onDetach.addListener((source) => {
-  state.debuggerAttached.delete(source.tabId);
-});
+if (chrome.debugger?.onDetach) {
+  chrome.debugger.onDetach.addListener((source) => {
+    state.debuggerAttached.delete(source.tabId);
+  });
+}
 
 // ---------------------------------------------------------------------------
 // CDP — Read page context (for popup)

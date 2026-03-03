@@ -17,6 +17,7 @@ export default function App() {
   const [guidanceSession, setGuidanceSession] = useState({ taskSummary: null, totalSteps: 0 });
   const [stepProgress, setStepProgress] = useState(null);
   const [guidanceSuggestions, setGuidanceSuggestions] = useState([]);
+  const [guidancePlanSteps, setGuidancePlanSteps] = useState(null);
 
   // Resizable panels: chatRatio = fraction of main-content height for chat
   const [chatRatio, setChatRatio] = useState(0.45);
@@ -94,6 +95,17 @@ export default function App() {
       case "GUIDANCE_SESSION_START":
         setGuidanceSession({ taskSummary: data.taskSummary, totalSteps: data.totalSteps || 0 });
         setGuidanceSuggestions([]);
+        if (data.steps?.length) setGuidancePlanSteps(data.steps);
+        break;
+      case "STEP_STATUS_UPDATE":
+        setGuidancePlanSteps((prev) => {
+          if (!prev) return prev;
+          return prev.map((s) => {
+            if (s.stepNumber === data.completedStep) return { ...s, status: "completed" };
+            if (s.stepNumber === data.nextStep) return { ...s, status: "active" };
+            return s;
+          });
+        });
         break;
       case "STEP_PROGRESS":
         setGuidanceSession((s) => ({ ...s, taskSummary: data.taskSummary || s.taskSummary, totalSteps: data.totalSteps || s.totalSteps }));
@@ -134,11 +146,13 @@ export default function App() {
         ]);
         setGuidanceSession({ taskSummary: null, totalSteps: 0 });
         setStepProgress(null);
+        setGuidancePlanSteps((prev) => prev ? prev.map(s => ({ ...s, status: "completed" })) : prev);
         break;
       case "GUIDANCE_ABANDONED":
         setGuidanceSession({ taskSummary: null, totalSteps: 0 });
         setStepProgress(null);
         setGuidanceSuggestions([]);
+        setGuidancePlanSteps(null);
         setChatMessages((prev) => [
           ...prev,
           { text: "⚠️ " + (data.reason || "Guidance stopped"), sender: "system", timestamp: Date.now() },
@@ -257,6 +271,7 @@ export default function App() {
           taskSummary={guidanceSession.taskSummary}
           onConfirmStepYes={confirmStepYes}
           onConfirmStepNo={confirmStepNo}
+          guidancePlanSteps={guidancePlanSteps}
         />
       </main>
     </div>

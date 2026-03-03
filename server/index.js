@@ -3,7 +3,7 @@ import express from "express";
 import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import cors from "cors";
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+import { HumanMessage, SystemMessage, AIMessage } from "@langchain/core/messages";
 import { annotateScreenshot } from "./annotate.js";
 import { createBrowserAgent, runBrowserAgent, classifyIntent } from "./agent.js";
 import { createChatModel, getAvailableProviders, getDefaultModel, getGuidanceModel } from "./models.js";
@@ -39,7 +39,7 @@ const wss = new WebSocketServer({ server });
 // ---------------------------------------------------------------------------
 // Client tracking
 // ---------------------------------------------------------------------------
-const clients = { extension: new Set(), dashboard: new Set() };
+const clients = { extension: new Set(), dashboard: new Set(), desktop: new Set() };
 
 const recentEvents = [];
 const MAX_EVENTS = 500;
@@ -62,6 +62,87 @@ let activeChatAbort = null;
 // Last page context per threadId (for multi-step guidance session)
 const sessionContextMap = new Map();
 
+// ---------------------------------------------------------------------------
+// Conversation history store (in-memory, resets on server restart)
+// ---------------------------------------------------------------------------
+const conversations = new Map();
+const MAX_MESSAGES_PER_CONV = 50;
+const HISTORY_CONTEXT_WINDOW = 20;
+
+function getOrCreateConversation(threadId) {
+  if (!conversations.has(threadId)) {
+    conversations.set(threadId, {
+      threadId,
+      messages: [],
+      createdAt: Date.now(),
+      lastUpdatedAt: Date.now(),
+    });
+  }
+  return conversations.get(threadId);
+}
+
+function addMessageToConversation(threadId, role, text) {
+  const conv = getOrCreateConversation(threadId);
+  conv.messages.push({ role, text, timestamp: Date.now() });
+  if (conv.messages.length > MAX_MESSAGES_PER_CONV) conv.messages.shift();
+  conv.lastUpdatedAt = Date.now();
+}
+
+function getConversationHistory(threadId, limit = HISTORY_CONTEXT_WINDOW) {
+  const conv = conversations.get(threadId);
+  if (!conv) return [];
+  return conv.messages.slice(Math.max(0, conv.messages.length - limit));
+}
+
+function createNewConversation() {
+  const threadId = `thread_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+  getOrCreateConversation(threadId);
+  return threadId;
+}
+
+function listConversations() {
+  return Array.from(conversations.values())
+    .sort((a, b) => b.lastUpdatedAt - a.lastUpdatedAt)
+    .map((c) => ({
+      threadId: c.threadId,
+      createdAt: c.createdAt,
+      lastUpdatedAt: c.lastUpdatedAt,
+      messageCount: c.messages.length,
+      preview: c.messages.length > 0
+        ? (c.messages.find(m => m.role === "user")?.text || c.messages[0].text || "").slice(0, 60)
+        : "New conversation",
+    }));
+}
+
+function deleteConversation(threadId) {
+  conversations.delete(threadId);
+  sessionContextMap.delete(threadId);
+}
+
+/** Build a LangChain message array from conversation history + current message */
+function buildMessagesWithHistory(threadId, currentText, systemPrompt) {
+  const msgs = [new SystemMessage(systemPrompt)];
+  const history = getConversationHistory(threadId);
+
+  // Simple token estimation: ~4 chars per token, keep under ~6000 tokens for history
+  let tokenBudget = 6000;
+  const historyMsgs = [];
+  for (let i = history.length - 1; i >= 0; i--) {
+    const est = Math.ceil(history[i].text.length / 4);
+    if (tokenBudget - est < 0) break;
+    tokenBudget -= est;
+    historyMsgs.unshift(history[i]);
+  }
+
+  for (const m of historyMsgs) {
+    if (m.role === "user") msgs.push(new HumanMessage(m.text));
+    else if (m.role === "ai") msgs.push(new AIMessage(m.text));
+  }
+
+  msgs.push(new HumanMessage(currentText));
+  return msgs;
+}
+
 function pushEvent(event) {
   recentEvents.push(event);
   if (recentEvents.length > MAX_EVENTS) recentEvents.shift();
@@ -82,34 +163,52 @@ function sendToExtension(data) {
   return false;
 }
 
+function sendToDesktop(data) {
+  const msg = JSON.stringify(data);
+  for (const ws of clients.desktop) {
+    if (ws.readyState === 1) { ws.send(msg); return true; }
+  }
+  return false;
+}
+
+/**
+ * Send a CDP-requiring message (GATHER_CONTEXT / EXECUTE_ACTION).
+ * Prefers the Electron desktop client (which uses webContents.debugger);
+ * falls back to the extension (which uses chrome.debugger — only available
+ * in a real Chrome environment, not Electron).
+ */
+function sendToCdpClient(data) {
+  return sendToDesktop(data) || sendToExtension(data);
+}
+
 // ---------------------------------------------------------------------------
-// Request context from extension
+// Request context from CDP client (desktop preferred, extension fallback)
 // ---------------------------------------------------------------------------
 function requestContextFromExtension() {
   return new Promise((resolve, reject) => {
     const requestId = `ctx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const sent = sendToExtension({ type: "GATHER_CONTEXT", requestId });
+    const sent = sendToCdpClient({ type: "GATHER_CONTEXT", requestId });
     if (!sent) {
-      reject(new Error("No extension connected. Attach the debugger from the extension popup."));
+      reject(new Error("No browser client connected. Open the Electron app or attach the extension."));
       return;
     }
     const timer = setTimeout(() => {
       pendingContextRequests.delete(requestId);
-      reject(new Error("Context gathering timed out — is the debugger attached?"));
+      reject(new Error("Context gathering timed out"));
     }, CONTEXT_TIMEOUT);
     pendingContextRequests.set(requestId, { resolve, reject, timer });
   });
 }
 
 // ---------------------------------------------------------------------------
-// Request action execution from extension
+// Request action execution from CDP client (desktop preferred, extension fallback)
 // ---------------------------------------------------------------------------
 function requestActionExecution(action) {
   return new Promise((resolve, reject) => {
     const requestId = `act_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const sent = sendToExtension({ type: "EXECUTE_ACTION", requestId, action });
+    const sent = sendToCdpClient({ type: "EXECUTE_ACTION", requestId, action });
     if (!sent) {
-      reject(new Error("No extension connected. Attach the debugger from the extension popup."));
+      reject(new Error("No browser client connected. Open the Electron app or attach the extension."));
       return;
     }
     const timer = setTimeout(() => {
@@ -623,6 +722,7 @@ wss.on("connection", (ws, req) => {
       activeAgentModel,
       activeGuidanceModel,
       webmcp: latestWebMCP,
+      conversations: listConversations(),
     }));
   }
 
@@ -755,8 +855,52 @@ wss.on("connection", (ws, req) => {
         break;
       }
 
+      case "NEW_CHAT": {
+        const newThreadId = createNewConversation();
+        console.log(`[Chat] New conversation created: ${newThreadId}`);
+        broadcast("dashboard", {
+          type: "NEW_CHAT_CREATED",
+          threadId: newThreadId,
+          conversations: listConversations(),
+        });
+        break;
+      }
+
+      case "SWITCH_CHAT": {
+        const conv = conversations.get(msg.threadId);
+        if (conv) {
+          console.log(`[Chat] Switching to conversation: ${msg.threadId}`);
+          broadcast("dashboard", {
+            type: "CHAT_SWITCHED",
+            threadId: msg.threadId,
+            messages: conv.messages,
+            conversations: listConversations(),
+          });
+        }
+        break;
+      }
+
+      case "DELETE_CHAT": {
+        console.log(`[Chat] Deleting conversation: ${msg.threadId}`);
+        deleteConversation(msg.threadId);
+        broadcast("dashboard", {
+          type: "CHAT_DELETED",
+          threadId: msg.threadId,
+          conversations: listConversations(),
+        });
+        break;
+      }
+
+      case "LIST_CHATS": {
+        ws.send(JSON.stringify({
+          type: "CONVERSATIONS_LIST",
+          conversations: listConversations(),
+        }));
+        break;
+      }
+
       case "CHAT_MESSAGE": {
-        handleChatMessage(msg.text, ws);
+        handleChatMessage(msg.text, ws, msg.threadId || null);
         break;
       }
 
@@ -771,11 +915,13 @@ wss.on("connection", (ws, req) => {
       }
 
       case "SHOW_GUIDANCE": {
+        sendToDesktop({ type: "SHOW_GUIDANCE", guides: msg.guides || [] });
         sendToExtension({ type: "SHOW_GUIDANCE", guides: msg.guides || [] });
         break;
       }
 
       case "CLEAR_GUIDANCE": {
+        sendToDesktop({ type: "CLEAR_GUIDANCE" });
         sendToExtension({ type: "CLEAR_GUIDANCE" });
         break;
       }
@@ -973,12 +1119,30 @@ async function showCurrentStep(threadId) {
     ? highlights.map((h, i) => {
         const el = context.elements[h.elementIndex];
         if (!el?.bounds) return null;
+        // Build a robust CSS selector — prefer ID, fall back to tag + attributes
+        let selector = null;
+        if (el.id) {
+          selector = `#${el.id}`;
+        } else {
+          // Build a selector from tag, role, aria-label, href, or text content
+          const tag = el.tag || '*';
+          if (el.role) {
+            selector = `${tag}[role="${el.role}"]`;
+          } else if (el.href) {
+            // Use href attribute for links (truncated to avoid overly long selectors)
+            const shortHref = el.href.length > 80 ? el.href.slice(0, 80) : el.href;
+            selector = `${tag}[href="${shortHref}"]`;
+          } else if (el.text && el.text.length <= 60) {
+            // Use :has or xpath-like text matching isn't standard CSS — leave for bounds
+            selector = null;
+          }
+        }
         return {
           bounds: el.bounds,
           label: h.label || `${i + 1}`,
           reason: "",
           color: h.color || HIGHLIGHT_COLORS[i % HIGHLIGHT_COLORS.length],
-          selector: el.id ? `#${el.id}` : null,
+          selector,
         };
       }).filter(Boolean)
     : [];
@@ -1017,9 +1181,22 @@ async function showCurrentStep(threadId) {
     guidance: guidanceData,
   });
 
-  if (guidanceData.length > 0) {
-    sendToExtension({ type: "SHOW_GUIDANCE", guides: guidanceData });
-  }
+  // Always send SHOW_GUIDANCE before STEP_GUIDANCE so the overlay's
+  // currentGuides state is populated.  Previously this was guarded by
+  // `guidanceData.length > 0`, which caused STEP_GUIDANCE to reference
+  // an empty currentGuides array when no valid highlights were found —
+  // resulting in the overlay progress panel appearing with no highlights.
+  sendToDesktop({ type: "SHOW_GUIDANCE", guides: guidanceData });
+  sendToExtension({ type: "SHOW_GUIDANCE", guides: guidanceData });
+
+  sendToDesktop({
+    type: "STEP_GUIDANCE",
+    step: session.currentStepIndex,
+    stepNumber,
+    totalSteps,
+    instruction: step.instruction,
+    taskSummary: session.taskSummary,
+  });
   sendToExtension({
     type: "STEP_GUIDANCE",
     step: session.currentStepIndex,
@@ -1178,11 +1355,21 @@ async function handleStepCompleted(msg) {
   session._verifyRetries = 0;
   console.log(`[STEP] Advancing from step ${stepNumber}`);
 
+  // Broadcast step status update so plan card can mark this step done
+  broadcast("dashboard", {
+    type: "STEP_STATUS_UPDATE",
+    completedStep: parseInt(stepNumber, 10),
+    nextStep: session.currentStepIndex + 1 < session.steps.length
+      ? session.steps[session.currentStepIndex + 1].stepNumber
+      : null,
+  });
+
   const nextStep = sessionManager.advanceStep(threadId);
   if (nextStep) {
     showCurrentStep(threadId);
   } else {
     sessionManager.completeSession(threadId);
+    sendToDesktop({ type: "CLEAR_GUIDANCE" });
     sendToExtension({ type: "CLEAR_GUIDANCE" });
     const suggestions = sessionManager.getLastSuggestions(threadId);
     broadcast("dashboard", {
@@ -1221,6 +1408,7 @@ function handleStepAbandoned(msg) {
   // Explicit abandon (Tab unreachable, user cancelled, etc.) — end the session.
   stopPollingVerification(threadId);
   sessionManager.abandonSession(threadId);
+  sendToDesktop({ type: "CLEAR_GUIDANCE" });
   sendToExtension({ type: "CLEAR_GUIDANCE" });
   broadcast("dashboard", {
     type: "GUIDANCE_ABANDONED",
@@ -1245,8 +1433,8 @@ function handleStopChat() {
   });
 }
 
-async function handleChatMessage(text, senderWs) {
-  const threadId = "default";
+async function handleChatMessage(text, senderWs, incomingThreadId = null) {
+  const threadId = incomingThreadId || createNewConversation();
   const resolvedText = resolveMessage(threadId, text);
   if (resolvedText !== text) {
     console.log(`[SESSION] Resolved message to suggestion: "${resolvedText.slice(0, 50)}"`);
@@ -1255,13 +1443,15 @@ async function handleChatMessage(text, senderWs) {
   if (sessionManager.hasActiveSession(threadId)) {
     sessionManager.abandonSession(threadId);
     sessionContextMap.delete(threadId);
+    sendToDesktop({ type: "CLEAR_GUIDANCE" });
     sendToExtension({ type: "CLEAR_GUIDANCE" });
     broadcast("dashboard", { type: "GUIDANCE_ABANDONED", reason: "New message started" });
   }
 
-  const userMsg = { type: "CHAT_MESSAGE", text: resolvedText, sender: "user", timestamp: Date.now() };
+  const userMsg = { type: "CHAT_MESSAGE", text: resolvedText, sender: "user", timestamp: Date.now(), threadId };
   pushEvent(userMsg);
   broadcast("dashboard", userMsg);
+  addMessageToConversation(threadId, "user", resolvedText);
 
   // Cancel any previous in-flight request
   if (activeChatAbort) activeChatAbort.abort();
@@ -1316,17 +1506,17 @@ async function handleChatMessage(text, senderWs) {
         await handleAgentAction(resolvedText, abort.signal);
       } else {
         console.log(`\x1b[32m[Chat] → Agent unavailable, falling back to \x1b[1mChat mode\x1b[0m`);
-        await handleNormalChat(resolvedText, pageContext, abort.signal);
+        await handleNormalChat(resolvedText, pageContext, abort.signal, threadId);
       }
       break;
     case "guidance":
       console.log(`\x1b[32m[Chat] → Routing to \x1b[1mGuidance AI\x1b[0m\x1b[32m (screenshot + context analysis)\x1b[0m`);
-      await handleGuidanceChat(resolvedText, pageContext, abort.signal);
+      await handleGuidanceChat(resolvedText, pageContext, abort.signal, threadId);
       break;
     case "chat":
     default:
       console.log(`\x1b[32m[Chat] → Routing to \x1b[1mNormal Chat\x1b[0m`);
-      await handleNormalChat(resolvedText, pageContext, abort.signal);
+      await handleNormalChat(resolvedText, pageContext, abort.signal, threadId);
       break;
   }
 }
@@ -1334,8 +1524,7 @@ async function handleChatMessage(text, senderWs) {
 // ---------------------------------------------------------------------------
 // GUIDANCE mode — multi-step session
 // ---------------------------------------------------------------------------
-async function handleGuidanceChat(text, prefetchedContext = null, signal = null) {
-  const threadId = "default";
+async function handleGuidanceChat(text, prefetchedContext = null, signal = null, threadId = "default") {
   broadcast("dashboard", { type: "AI_THINKING", thinking: true });
 
   try {
@@ -1367,6 +1556,19 @@ async function handleGuidanceChat(text, prefetchedContext = null, signal = null)
       return;
     }
 
+    // Store guidance plan in conversation history so future messages have context
+    const planSummary = `[Guidance started] ${plan.taskSummary}\nSteps: ${plan.steps.map((s, i) => `${i+1}. ${s.instruction}`).join("; ")}`;
+    addMessageToConversation(threadId, "ai", planSummary);
+
+    // ── Send all steps as a readable chat message BEFORE starting guidance ──
+    const stepsText = plan.steps.map((s, i) => `${i + 1}. ${s.instruction}`).join("\n");
+    broadcast("dashboard", {
+      type: "CHAT_MESSAGE",
+      text: `**${plan.taskSummary}**\n\nHere's what we'll do:\n\n${stepsText}\n\n▶ Starting guidance — follow the highlights on the page.`,
+      sender: "ai",
+      timestamp: Date.now(),
+    });
+
     sessionManager.createSession(threadId, text, plan);
     sessionContextMap.set(threadId, context);
 
@@ -1374,6 +1576,11 @@ async function handleGuidanceChat(text, prefetchedContext = null, signal = null)
       type: "GUIDANCE_SESSION_START",
       taskSummary: plan.taskSummary,
       totalSteps: plan.steps.length,
+      steps: plan.steps.map((s, i) => ({
+        stepNumber: s.stepNumber || i + 1,
+        instruction: s.instruction,
+        status: i === 0 ? "active" : "pending",
+      })),
     });
 
     await showCurrentStep(threadId);
@@ -1394,7 +1601,7 @@ async function handleGuidanceChat(text, prefetchedContext = null, signal = null)
 // ---------------------------------------------------------------------------
 const CHAT_SYSTEM_PROMPT = `You are CoLearn Assistant — a helpful, friendly AI assistant. Answer questions, have conversations, explain concepts, and help with anything the user asks. Be concise and clear. Use **bold** for emphasis when helpful. You can use markdown-style formatting.`;
 
-async function handleNormalChat(text, prefetchedContext = null, signal = null) {
+async function handleNormalChat(text, prefetchedContext = null, signal = null, threadId = "default") {
   broadcast("dashboard", { type: "AI_THINKING", thinking: true });
 
   try {
@@ -1407,14 +1614,17 @@ async function handleNormalChat(text, prefetchedContext = null, signal = null) {
     }
 
     const model = createChatModel(activeGuidanceModel.provider, activeGuidanceModel.model);
-    const result = await model.invoke([
-      new SystemMessage(CHAT_SYSTEM_PROMPT),
-      new HumanMessage(text),
-    ]);
+
+    // Build message array with conversation history for context
+    const messages = buildMessagesWithHistory(threadId, text, CHAT_SYSTEM_PROMPT);
+    const result = await model.invoke(messages);
 
     if (signal?.aborted) return;
 
     const raw = typeof result.content === "string" ? result.content : JSON.stringify(result.content);
+
+    // Store AI response in conversation history
+    addMessageToConversation(threadId, "ai", raw);
 
     const aiMsg = {
       type: "CHAT_MESSAGE", text: raw, sender: "ai", timestamp: Date.now(),
@@ -1498,7 +1708,7 @@ app.get("/api/health", (_req, res) => {
     activeAgentModel,
     activeGuidanceModel,
     providers: availableProviders,
-    connections: { extension: clients.extension.size, dashboard: clients.dashboard.size },
+    connections: { extension: clients.extension.size, dashboard: clients.dashboard.size, desktop: clients.desktop.size },
     events: recentEvents.length,
     webmcp: latestWebMCP,
   });

@@ -110,7 +110,8 @@
 - **Server → Extension**: Sends `GATHER_CONTEXT` and `EXECUTE_ACTION` requests
 - **Extension → Server**: Replies with `CONTEXT_RESPONSE` (screenshot + DOM + network + console + elements with bounding boxes + CSS selectors) or `ACTION_RESULT`
 - **Server → Dashboard**: Broadcasts events, screenshots, AI responses, annotated images, agent steps, model changes
-- **Server → Extension → overlay.js**: Relays `SHOW_GUIDANCE` / `CLEAR_GUIDANCE` for on-page rendering
+- **Server → Extension → overlay.js**: Relays `SHOW_GUIDANCE` / `CLEAR_GUIDANCE` / `STEP_GUIDANCE` for on-page rendering (Chrome extension path via `chrome.tabs.sendMessage`)
+- **Server → Desktop → overlay.js**: Relays guidance via WebSocket → renderer IPC → `wc.executeJavaScript()` custom event dispatch (Electron path). Overlay.js is manually injected on each `did-finish-load` for reliability.
 
 ### Three AI Modes
 
@@ -214,7 +215,7 @@ co-learn-3/
 - `debugger` — attach Chrome DevTools Protocol
 - `tabs` — query and track tabs
 
-Content scripts match `<all_urls>` to run on every page. Both `content.js` (observer) and `overlay.js` (visual guidance) are injected. The background runs as a service worker.
+Content scripts match `<all_urls>` to run on every page with `"run_at": "document_end"` for reliable injection timing. Both `content.js` (observer) and `overlay.js` (visual guidance) are injected. The background runs as a service worker.
 
 ---
 
@@ -539,10 +540,58 @@ The classifier sends the user message + current page URL to the model with a `CL
 - **Floating pill control** — small bottom-right pill with controls (only interactive element, `pointer-events: auto`)
 - **Auto-fade** — visuals fade out after 6 seconds, un-fade on control hover
 - **Escape to dismiss** — keyboard shortcut to clear all overlay elements
+- **Step progress panel** — top-right collapsible panel showing task summary, dot progress indicators, current instruction, and "Waiting for you…" status
 
 **Triggered by**:
 1. **Auto** — AI responses with highlights automatically send `SHOW_GUIDANCE` to the extension
 2. **Manual** — "Show on Page" / "Clear Overlay" buttons in the chat panel or Electron popup
+
+**How the overlay code works (detailed flow)**:
+
+1. **Injection**: `overlay.js` is declared in `manifest.json` as a content script with `"run_at": "document_end"`. It runs on all URLs except `localhost:5173` (the CoLearn dashboard). A double-injection guard (`window.__colearn_overlay_injected__`) prevents duplicate execution when scripts are re-injected programmatically.
+
+2. **Style injection**: On the first `SHOW_GUIDANCE` message, `injectStyles()` creates a `<style>` element (`__colearn_styles__`) containing all CSS classes: `.__colearn_highlight`, `.__colearn_pin`, `.__colearn_label`, `.__colearn_tooltip`, `.__colearn_arrow_svg`, `.__colearn_pill`, `.__colearn_progress`, etc. All visual elements use `position: fixed` with `z-index: 2147483647` (max int).
+
+3. **Element bounds resolution**: `getElementBounds(guide)` first attempts a live DOM lookup via `guide.selector` (CSS selector) for accurate viewport-relative positioning. If the selector fails or is null, it falls back to `guide.bounds` (cached bounding rect from the server's context gathering). The live lookup includes a visibility check (`rect.width > 0 && rect.height > 0`) and is wrapped in try/catch for invalid selectors.
+
+4. **Rendering**: `renderSingleGuide()` creates DOM elements (highlight box, numbered pin, label, optional tooltip) positioned at the element's bounds. Elements with a valid selector are auto-scrolled into view via `scrollIntoView()`.
+
+5. **Two display modes**:
+   - `showAllGuides(guides)` — renders all highlights at once with connecting SVG arrows between sequential elements. Starts the 6-second auto-fade timer. Renders the pill control in "all" mode.
+   - `showStep(guides, idx)` — renders a single step with tooltip. Clears auto-fade timer. Shows prev/next navigation in the pill. Uses a 220ms opacity transition between steps.
+
+6. **Message listeners** — two paths for receiving guidance commands:
+   - **Chrome extension path**: `chrome.runtime.onMessage` listener handles `SHOW_GUIDANCE`, `CLEAR_GUIDANCE`, `STEP_GUIDANCE` from the background service worker.
+   - **Electron (desktop CDP) path**: `window.__colearn_guidance__` custom event listener handles the same message types, dispatched by `wc.executeJavaScript()` from the main process.
+
+7. **State management**: `currentGuides[]` stores the active guide array. `stepIndex` tracks the current step in step-by-step mode. `currentStepInfo` tracks metadata (stepNumber, totalSteps, instruction, taskSummary) for the progress panel. `dismissed` flag prevents auto-fade after manual dismissal.
+
+8. **CSS selector generation** (server-side): The server builds CSS selectors for each highlighted element. It prefers `#id` selectors, falls back to `tag[role="..."]` or `tag[href="..."]` attribute selectors for elements without IDs, and uses cached bounds as a final fallback.
+
+9. **Color system**: Six rotating highlight colors (`#FF3B6F`, `#00BCD4`, `#FF9800`, `#4CAF50`, `#9C27B0`, `#2196F3`). Each guide can also specify a custom `guide.color`.
+
+```
+Server (showCurrentStep)
+    │
+    ├── Gathers fresh context (screenshot + elements + viewport)
+    ├── Maps step.highlights[].elementIndex → context.elements[] → bounds + selector
+    ├── Builds annotatedImage via annotate.js (SVG overlays composited with sharp)
+    │
+    ├── Broadcasts STEP_PROGRESS to dashboard (image + guidance data)
+    │
+    ├── Sends SHOW_GUIDANCE { guides[] } to extension + desktop
+    │     │
+    │     ├── Extension path: background.js → chrome.tabs.sendMessage → overlay.js
+    │     │     overlay.js: showAllGuides(guides) → sets currentGuides, renders highlights
+    │     │
+    │     └── Desktop path: renderer.js → IPC → browserManager.js → wc.executeJavaScript
+    │           dispatches CustomEvent('__colearn_guidance__') → overlay.js listener
+    │
+    └── Sends STEP_GUIDANCE { step, stepNumber, totalSteps, instruction, taskSummary }
+          │
+          └── overlay.js: updates currentStepInfo, renders progress panel,
+              calls showStep(currentGuides, step) → renders single highlight + tooltip
+```
 
 ---
 
@@ -554,12 +603,20 @@ The classifier sends the user message + current page URL to the model with a `CL
 
 **Files**:
 - `main.js` — Main process: creates main window and floating popup, manages IPC, handles window positioning, system tray integration
-- `renderer.js` — Main window renderer: mirrors the React dashboard functionality (chat, screen mirror, events, drawing)
+- `browserManager.js` — Manages the inline browser via `WebContentsView`. Handles tab creation/switching, CDP attachment, context gathering (`gatherContext()`), action execution, and guidance relay (`cdp:showGuidance`). Automatically injects `overlay.js` into every page after navigation (`did-finish-load` event) since Electron's extension content script injection is unreliable.
+- `renderer.js` — Main window renderer: mirrors the React dashboard functionality (chat, screen mirror, events, drawing). Bridges WebSocket messages to IPC for guidance relay.
 - `popup-renderer.js` — Floating popup renderer: lightweight chat-only interface that connects to the backend via WebSocket
   - "Show on Page" guidance button on AI messages with highlights
   - Sends `SHOW_GUIDANCE` / `CLEAR_GUIDANCE` to the server to trigger on-page overlay from the desktop app
+- `preload.js` — Exposes `electronAPI` to renderer via `contextBridge` (gatherContext, executeAction, showGuidance, browser controls)
 - `index.html` / `popup.html` — HTML shells for the two window types
 - `styles.css` — Desktop-specific styling
+
+**Desktop overlay injection flow**:
+1. `browserManager.js` loads the Chrome extension via `session.loadExtension()` for basic extension features.
+2. Since Electron's content script injection from loaded extensions is unreliable, `browserManager.js` also reads `overlay.js` from disk and injects it via `wc.executeJavaScript()` on every `did-finish-load` event.
+3. When guidance messages arrive, `cdp:showGuidance` dispatches a `__colearn_guidance__` custom event into the page, which the injected overlay.js listens for.
+4. The overlay IIFE's double-injection guard (`__colearn_overlay_injected__`) ensures the script only initializes once per page, even if both the extension content script mechanism and the manual injection both succeed.
 
 **Running**:
 ```bash
