@@ -739,7 +739,7 @@ wss.on("connection", (ws, req) => {
     }));
   }
 
-  ws.on("message", (raw) => {
+  ws.on("message", async (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
 
