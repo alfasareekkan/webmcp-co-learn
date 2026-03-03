@@ -24,7 +24,7 @@ const mainBtn = $("mainBtn");
 const closeBtn = $("closeBtn");
 
 /* ===== WebSocket ===== */
-const WS_URL = "ws://localhost:3001?role=dashboard";
+const WS_URL = "wss://webmcp-co-learn-production.up.railway.app?role=dashboard";
 let reconnectTimer = null;
 
 function wsConnect() {

@@ -8,25 +8,38 @@ import { annotateScreenshot } from "./annotate.js";
 import { createBrowserAgent, runBrowserAgent, classifyIntent } from "./agent.js";
 import { createChatModel, getAvailableProviders, getDefaultModel, getGuidanceModel } from "./models.js";
 import * as sessionManager from "./guidanceSessionManager.js";
+import { loadApiKeys, saveApiKeys } from "./supabase.js";
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 const PORT = process.env.PORT || 3001;
 
+// ── Load persisted API keys from Supabase BEFORE initialising providers ──────
+// Top-level await is fine here because the server uses "type":"module" (ESM).
+{
+  const stored = await loadApiKeys();
+  if (stored.gemini)    process.env.GEMINI_API_KEY    = stored.gemini;
+  if (stored.openai)    process.env.OPENAI_API_KEY    = stored.openai;
+  if (stored.anthropic) process.env.ANTHROPIC_API_KEY = stored.anthropic;
+  if (stored.gemini || stored.openai || stored.anthropic) {
+    console.log("[Supabase] Loaded API keys from database.");
+  }
+}
+
 // Active model selection (can be changed at runtime via dashboard)
-let activeAgentModel = getDefaultModel();
+let activeAgentModel   = getDefaultModel();
 let activeGuidanceModel = getGuidanceModel();
 
-const availableProviders = getAvailableProviders();
-const aiEnabled = availableProviders.length > 0;
+let availableProviders = getAvailableProviders();
+let aiEnabled          = availableProviders.length > 0;
 
 if (aiEnabled) {
   console.log(`[AI] Providers available: ${availableProviders.map(p => p.name).join(", ")}`);
   console.log(`[AI] Agent model: ${activeAgentModel?.provider}/${activeAgentModel?.model}`);
   console.log(`[AI] Guidance model: ${activeGuidanceModel?.provider}/${activeGuidanceModel?.model}`);
 } else {
-  console.warn("[AI] No API keys configured. Set GEMINI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY in .env");
+  console.warn("[AI] No API keys configured — waiting for keys from dashboard.");
 }
 
 const app = express();
@@ -941,6 +954,47 @@ wss.on("connection", (ws, req) => {
         } else {
           broadcast("dashboard", { type: "CHAT_MESSAGE", text: "No extension connected for WebMCP scan.", sender: "system", timestamp: Date.now() });
         }
+        break;
+      }
+
+      case "UPDATE_API_KEYS": {
+        const { gemini, openai, anthropic } = msg;
+
+        // Apply keys to the running process immediately
+        if (gemini)    process.env.GEMINI_API_KEY    = gemini;
+        else           delete process.env.GEMINI_API_KEY;
+        if (openai)    process.env.OPENAI_API_KEY    = openai;
+        else           delete process.env.OPENAI_API_KEY;
+        if (anthropic) process.env.ANTHROPIC_API_KEY = anthropic;
+        else           delete process.env.ANTHROPIC_API_KEY;
+
+        // Persist to Supabase so keys survive restarts
+        await saveApiKeys({ gemini, openai, anthropic });
+
+        // Refresh provider / model selections
+        availableProviders = getAvailableProviders();
+        aiEnabled          = availableProviders.length > 0;
+        activeAgentModel   = getDefaultModel();
+        activeGuidanceModel = getGuidanceModel();
+
+        broadcast("dashboard", {
+          type: "PROVIDERS_UPDATED",
+          aiEnabled,
+          providers:          availableProviders,
+          activeAgentModel,
+          activeGuidanceModel,
+        });
+
+        broadcast("dashboard", {
+          type:      "CHAT_MESSAGE",
+          text:      aiEnabled
+            ? `✅ API keys saved. Using: ${availableProviders.map(p => p.name).join(", ")}`
+            : "⚠️ No valid API keys — please check your keys and try again.",
+          sender:    "system",
+          timestamp: Date.now(),
+        });
+
+        console.log(`[API Keys] Updated. Providers: ${availableProviders.map(p => p.name).join(", ") || "none"}`);
         break;
       }
     }

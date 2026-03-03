@@ -4,8 +4,11 @@
 
 "use strict";
 
-const WS_URL = "ws://localhost:3001?role=extension";
-const COLEARN_APP = "localhost:5173";
+// Load centralised URL config (sets globalThis.COLEARN_CONFIG)
+importScripts("config.js");
+
+const WS_URL     = COLEARN_CONFIG.wsUrl("extension");
+const COLEARN_APP = COLEARN_CONFIG.dashboardHost;
 
 // ---------------------------------------------------------------------------
 // State

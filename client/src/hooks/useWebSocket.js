@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 
-const WS_URL = "ws://localhost:3001?role=dashboard";
+const WS_URL = "wss://webmcp-co-learn-production.up.railway.app?role=dashboard";
 const RECONNECT_DELAY = 2000;
 
 export default function useWebSocket(onMessage) {

@@ -105,7 +105,7 @@ async function injectOverlayScript(wc) {
 
 const EXT_PATH   = path.resolve(__dirname, '../Co-extension');
 const EXT_SES    = 'persist:colearn-browser';
-const HEALTH_URL = 'http://localhost:3001/api/health';
+const HEALTH_URL = 'https://webmcp-co-learn-production.up.railway.app/api/health';
 const POLL_MS    = 800;
 const POLL_MAX   = 30_000;
 
