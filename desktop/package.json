@@ -34,7 +34,6 @@
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
-      "icon": "build/icon.icns",
       "target": [
         { "target": "dmg", "arch": ["arm64", "x64"] },
         { "target": "zip", "arch": ["arm64", "x64"] }
@@ -45,7 +44,6 @@
       "window": { "width": 540, "height": 380 }
     },
     "win": {
-      "icon": "build/icon.ico",
       "target": [{ "target": "nsis", "arch": ["x64"] }],
       "artifactName": "${productName}-Setup-${version}.${ext}"
     },
