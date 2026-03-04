@@ -20,6 +20,7 @@ const state = {
   guidanceTotalSteps:  0,
   guidanceSuggestions: [],
   guidancePlanSteps: null,
+  wrongScreen: null,
   conversations: [],
   currentThreadId: null,
   // Browser
@@ -203,10 +204,41 @@ function handleMessage(data) {
       }
       renderChat();
       break;
+    case "WRONG_SCREEN":
+      state.wrongScreen = {
+        targetApp: data.targetApp,
+        targetUrlPattern: data.targetUrlPattern,
+        currentUrl: data.currentUrl,
+        message: data.message,
+      };
+      // Update plan steps to show "waiting" state
+      if (state.guidancePlanSteps) {
+        state.guidancePlanSteps = state.guidancePlanSteps.map((s) => {
+          if (s.status === "active") return { ...s, status: "waiting_for_screen" };
+          return s;
+        });
+      }
+      renderChat();
+      break;
+    case "CORRECT_SCREEN_DETECTED":
+      state.wrongScreen = null;
+      // Restore active state for current step
+      if (state.guidancePlanSteps) {
+        const hasActive = state.guidancePlanSteps.some(s => s.status === "active");
+        if (!hasActive) {
+          state.guidancePlanSteps = state.guidancePlanSteps.map((s) => {
+            if (s.status === "waiting_for_screen") return { ...s, status: "active" };
+            return s;
+          });
+        }
+      }
+      renderChat();
+      break;
     case "GUIDANCE_ABANDONED":
       state.guidanceTaskSummary = null;
       state.guidanceSuggestions = [];
       state.guidancePlanSteps = null;
+      state.wrongScreen = null;
       state.chatMessages.push({ text: "\u26A0 " + (data.reason || "Guidance stopped"), sender: "system", timestamp: Date.now() });
       renderChat();
       break;
@@ -218,6 +250,7 @@ function handleMessage(data) {
       state.guidanceTaskSummary = null;
       state.guidancePlanSteps = null;
       state.guidanceSuggestions = [];
+      state.wrongScreen = null;
       if (data.conversations) state.conversations = data.conversations;
       renderConversationList();
       renderChat();
@@ -227,6 +260,7 @@ function handleMessage(data) {
       state.guidanceTaskSummary = null;
       state.guidancePlanSteps = null;
       state.guidanceSuggestions = [];
+      state.wrongScreen = null;
       state.chatMessages = (data.messages || []).map((m) => ({
         text: m.text,
         sender: m.role === "user" ? "user" : m.role === "system" ? "system" : "ai",
@@ -463,13 +497,27 @@ function renderChat() {
       </div>
       <ol class="plan-card-steps">
         ${steps.map(s => {
-          const indicator = s.status === "completed" ? "&#x2705;" : s.status === "active" ? "&#x25B6;&#xFE0F;" : "&#x25CB;";
+          const indicator = s.status === "completed" ? "&#x2705;"
+            : s.status === "active" ? "&#x25B6;&#xFE0F;"
+            : s.status === "waiting_for_screen" ? "&#x23F3;"
+            : "&#x25CB;";
           return `<li class="plan-step plan-step-${s.status}">
             <span class="plan-step-indicator">${indicator}</span>
             <span class="plan-step-text">${escHtml(s.instruction)}</span>
           </li>`;
         }).join("")}
       </ol>
+    </div>`;
+  }
+
+  // Wrong screen banner
+  if (state.wrongScreen) {
+    html += `<div class="wrong-screen-banner">
+      <div class="wrong-screen-icon">⚠️</div>
+      <div class="wrong-screen-text">
+        <strong>Open ${escHtml(state.wrongScreen.targetApp)}</strong><br>
+        <span class="wrong-screen-detail">${escHtml(state.wrongScreen.message)}</span>
+      </div>
     </div>`;
   }
 
@@ -852,7 +900,7 @@ function desktopWsConnect() {
       }
     }
 
-    if (msg.type === 'SHOW_GUIDANCE' || msg.type === 'STEP_GUIDANCE' || msg.type === 'CLEAR_GUIDANCE') {
+    if (msg.type === 'SHOW_GUIDANCE' || msg.type === 'STEP_GUIDANCE' || msg.type === 'CLEAR_GUIDANCE' || msg.type === 'WRONG_SCREEN' || msg.type === 'CORRECT_SCREEN_DETECTED') {
       window.electronAPI.showGuidance(msg).catch((err) =>
         console.warn('[Desktop] showGuidance failed:', err.message)
       );

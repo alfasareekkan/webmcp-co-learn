@@ -9,6 +9,7 @@ const sessions = new Map();
 export const STATUS = {
   ACTIVE: "active",
   WAITING_FOR_STEP: "waiting_for_step",
+  WAITING_FOR_CORRECT_SCREEN: "waiting_for_correct_screen",
   COMPLETE: "complete",
   ABANDONED: "abandoned",
 };
@@ -42,6 +43,8 @@ export function createSession(threadId, question, fullPlan) {
     threadId,
     originalQuestion: question,
     taskSummary,
+    targetApp: fullPlan.targetApp || null,
+    targetUrlPattern: fullPlan.targetUrlPattern || null,
     steps,
     currentStepIndex: 0,
     completedSteps: [],
@@ -139,8 +142,24 @@ export function hasActiveSession(threadId) {
   const session = sessions.get(threadId);
   if (!session) return false;
   return (
-    session.status === STATUS.ACTIVE || session.status === STATUS.WAITING_FOR_STEP
+    session.status === STATUS.ACTIVE ||
+    session.status === STATUS.WAITING_FOR_STEP ||
+    session.status === STATUS.WAITING_FOR_CORRECT_SCREEN
   );
+}
+
+export function setWaitingForCorrectScreen(threadId) {
+  const session = sessions.get(threadId);
+  if (session) {
+    session.status = STATUS.WAITING_FOR_CORRECT_SCREEN;
+    session.lastUpdatedAt = new Date().toISOString();
+    log("setWaitingForCorrectScreen", "Waiting for user to open correct app", {
+      sessionId: session.sessionId,
+      threadId,
+      targetApp: session.targetApp,
+      targetUrlPattern: session.targetUrlPattern,
+    });
+  }
 }
 
 export function getLastSuggestions(threadId) {
@@ -182,7 +201,8 @@ export function getAllActiveSessions() {
   for (const [threadId, session] of sessions) {
     if (
       session.status === STATUS.ACTIVE ||
-      session.status === STATUS.WAITING_FOR_STEP
+      session.status === STATUS.WAITING_FOR_STEP ||
+      session.status === STATUS.WAITING_FOR_CORRECT_SCREEN
     ) {
       list.push({
         threadId,

@@ -63,6 +63,8 @@ const pendingActionRequests = new Map();
 const pendingWebMCPRequests = new Map();
 // P3: screenshot polling verification timers keyed by threadId
 const activePollers = new Map();
+// Screen monitor pollers — wait for user to navigate to the correct app
+const screenMonitors = new Map();
 const CONTEXT_TIMEOUT = 15000;
 const ACTION_TIMEOUT = 10000;
 
@@ -451,8 +453,12 @@ Analyze the screenshot and DOM, then break this task into 2-5 clear sequential s
 - Which element index to highlight (skip if the app renders via canvas/WebGL)
 - What signals indicate the user completed this step (provide 1-2 signals)
 
+IMPORTANT: Always include "targetApp" (human-readable app name like "Figma", "Google Sheets", "Notion") and "targetUrlPattern" (a URL substring that identifies the correct app, e.g. "figma.com", "docs.google.com/spreadsheets"). If the task is about a specific app, set these fields accordingly — even if the user is currently on a different page.
+
 Return ONLY valid JSON, no markdown, no explanation outside JSON:
 {
+  "targetApp": "Name of the app this guidance is for",
+  "targetUrlPattern": "url-substring-to-match",
   "taskSummary": "brief description of the full task",
   "steps": [
     {
@@ -600,6 +606,8 @@ function parseGuidanceResponse(raw) {
       get completionSignal() { return this.completionSignals[0]; },
     }));
     return {
+      targetApp: String(parsed.targetApp || "").slice(0, 60) || null,
+      targetUrlPattern: String(parsed.targetUrlPattern || "").slice(0, 120) || null,
       taskSummary: String(parsed.taskSummary || "Complete the task").slice(0, 300),
       steps,
       suggestedFollowUps: Array.isArray(parsed.suggestedFollowUps)
@@ -631,6 +639,8 @@ function parseGuidanceResponse(raw) {
     get completionSignal() { return this.completionSignals[0]; },
   };
   return {
+    targetApp: null,
+    targetUrlPattern: null,
     taskSummary: text.slice(0, 300) || "Complete the task",
     steps: [step],
     suggestedFollowUps: [],
@@ -1165,6 +1175,39 @@ async function showCurrentStep(threadId) {
     console.log(`[STEP] Fresh context unavailable (${err.message}) — using cached`);
   }
 
+  // ── Screen validation: check if user is on the correct app ──
+  const currentUrl = context?.url || "";
+  const targetPattern = session.targetUrlPattern;
+  if (targetPattern && currentUrl && !currentUrl.includes(targetPattern)) {
+    console.log(`[STEP] Wrong screen detected — expected "${targetPattern}", got "${currentUrl}"`);
+    sessionManager.setWaitingForCorrectScreen(threadId);
+
+    const wrongScreenData = {
+      type: "WRONG_SCREEN",
+      targetApp: session.targetApp || "the correct application",
+      targetUrlPattern: targetPattern,
+      currentUrl,
+      message: `Please open ${session.targetApp || "the correct application"} to continue. I'll detect when you're there and start guiding you.`,
+    };
+
+    broadcast("dashboard", {
+      type: "CHAT_MESSAGE",
+      text: `⚠️ You're currently on a different page. Please open **${session.targetApp || "the correct application"}** to continue.\n\nI'll automatically detect when you're there and start the guidance.`,
+      sender: "system",
+      timestamp: Date.now(),
+    });
+    broadcast("dashboard", wrongScreenData);
+    sendToDesktop(wrongScreenData);
+    sendToExtension(wrongScreenData);
+
+    // Start monitoring for when the user navigates to the correct app
+    startScreenMonitor(threadId);
+    return; // Don't show step guidance on the wrong screen
+  }
+
+  // If we were waiting for correct screen and now we're here, we're on the right page
+  stopScreenMonitor(threadId);
+
   // Reset the _completing flag so the new step can be completed
   if (session._completing) session._completing = false;
 
@@ -1346,6 +1389,97 @@ function startPollingVerification(threadId, step) {
   console.log(`[POLL] Started screenshot polling for step ${step.stepNumber} (interval: ${POLL_INTERVAL_MS}ms)`);
 }
 
+// ---------------------------------------------------------------------------
+// Screen monitor — polls until the user navigates to the correct app
+// ---------------------------------------------------------------------------
+function stopScreenMonitor(threadId) {
+  const id = screenMonitors.get(threadId);
+  if (id) {
+    clearInterval(id);
+    screenMonitors.delete(threadId);
+    console.log(`[SCREEN] Stopped screen monitor for thread ${threadId}`);
+  }
+}
+
+function startScreenMonitor(threadId) {
+  stopScreenMonitor(threadId); // clear any previous monitor
+
+  const session = sessionManager.getSession(threadId);
+  if (!session || !session.targetUrlPattern) return;
+
+  const targetPattern = session.targetUrlPattern;
+  const MONITOR_INTERVAL_MS = 3000;
+  const MONITOR_TIMEOUT_MS = 120000; // 2 minutes
+  const startTime = Date.now();
+
+  const intervalId = setInterval(async () => {
+    const currentSession = sessionManager.getSession(threadId);
+    if (!currentSession || currentSession.status !== "waiting_for_correct_screen") {
+      stopScreenMonitor(threadId);
+      return;
+    }
+
+    // Timeout — send a reminder
+    if (Date.now() - startTime > MONITOR_TIMEOUT_MS) {
+      broadcast("dashboard", {
+        type: "CHAT_MESSAGE",
+        text: `Still waiting for you to open **${currentSession.targetApp || "the correct application"}**. Navigate there whenever you're ready!`,
+        sender: "system",
+        timestamp: Date.now(),
+      });
+      // Reset the timer by restarting
+      stopScreenMonitor(threadId);
+      startScreenMonitor(threadId);
+      return;
+    }
+
+    let freshContext = null;
+    try {
+      freshContext = await Promise.race([
+        requestContextFromExtension(),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 3500)),
+      ]);
+    } catch { return; } // silent — try again next interval
+
+    const currentUrl = freshContext?.url || "";
+    if (currentUrl.includes(targetPattern)) {
+      console.log(`[SCREEN] Correct screen detected — "${currentUrl}" matches "${targetPattern}"`);
+      stopScreenMonitor(threadId);
+
+      // Update session back to active
+      sessionManager.setActive(threadId);
+
+      // Update context cache
+      if (freshContext) {
+        sessionContextMap.set(threadId, freshContext);
+        if (freshContext.screenshot) {
+          latestScreenshot = { dataUrl: freshContext.screenshot, url: freshContext.url, timestamp: Date.now() };
+          broadcast("dashboard", { type: "SCREENSHOT", ...latestScreenshot });
+        }
+      }
+
+      // Notify all clients
+      const correctScreenData = { type: "CORRECT_SCREEN_DETECTED", targetApp: currentSession.targetApp };
+      broadcast("dashboard", correctScreenData);
+      sendToDesktop(correctScreenData);
+      sendToExtension(correctScreenData);
+
+      broadcast("dashboard", {
+        type: "CHAT_MESSAGE",
+        text: `✅ ${currentSession.targetApp || "Correct application"} detected! Starting guidance now…`,
+        sender: "system",
+        timestamp: Date.now(),
+      });
+
+      // Now show the current step
+      await showCurrentStep(threadId);
+    }
+  }, MONITOR_INTERVAL_MS);
+
+  screenMonitors.set(threadId, intervalId);
+  console.log(`[SCREEN] Started screen monitor for thread ${threadId} — waiting for "${targetPattern}"`);
+}
+
 async function handleStepCompleted(msg) {
   const { threadId, sessionId, stepNumber } = msg;
   console.log(`[WATCHER] STEP_COMPLETED`, { threadId, sessionId, stepNumber, fromPoller: msg.fromPoller || false });
@@ -1354,6 +1488,12 @@ async function handleStepCompleted(msg) {
   const currentStep = sessionManager.getCurrentStep(threadId);
   if (!session || !currentStep || String(currentStep.stepNumber) !== String(stepNumber)) {
     console.log("[STEP] Ignoring STEP_COMPLETED — session or step mismatch");
+    return;
+  }
+
+  // Block completion signals when waiting for the user to navigate to the correct screen
+  if (session.status === "waiting_for_correct_screen") {
+    console.log("[STEP] Ignoring STEP_COMPLETED — waiting for correct screen");
     return;
   }
 
@@ -1427,6 +1567,7 @@ async function handleStepCompleted(msg) {
   if (nextStep) {
     showCurrentStep(threadId);
   } else {
+    stopScreenMonitor(threadId);
     sessionManager.completeSession(threadId);
     sendToDesktop({ type: "CLEAR_GUIDANCE" });
     sendToExtension({ type: "CLEAR_GUIDANCE" });
@@ -1466,6 +1607,7 @@ function handleStepAbandoned(msg) {
 
   // Explicit abandon (Tab unreachable, user cancelled, etc.) — end the session.
   stopPollingVerification(threadId);
+  stopScreenMonitor(threadId);
   sessionManager.abandonSession(threadId);
   sendToDesktop({ type: "CLEAR_GUIDANCE" });
   sendToExtension({ type: "CLEAR_GUIDANCE" });
@@ -1500,6 +1642,8 @@ async function handleChatMessage(text, senderWs, incomingThreadId = null) {
   }
 
   if (sessionManager.hasActiveSession(threadId)) {
+    stopPollingVerification(threadId);
+    stopScreenMonitor(threadId);
     sessionManager.abandonSession(threadId);
     sessionContextMap.delete(threadId);
     sendToDesktop({ type: "CLEAR_GUIDANCE" });

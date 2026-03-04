@@ -268,7 +268,7 @@ async function handleBackendMessage(msg) {
 
   // Relay guidance overlay commands and watcher config to the active tab's content script.
   // sendToTab() auto-injects the scripts if they aren't running yet (pre-existing tabs).
-  if (msg.type === "SHOW_GUIDANCE" || msg.type === "CLEAR_GUIDANCE" || msg.type === "STEP_GUIDANCE" || msg.type === "WATCH_FOR_COMPLETION") {
+  if (msg.type === "SHOW_GUIDANCE" || msg.type === "CLEAR_GUIDANCE" || msg.type === "STEP_GUIDANCE" || msg.type === "WATCH_FOR_COMPLETION" || msg.type === "WRONG_SCREEN" || msg.type === "CORRECT_SCREEN_DETECTED") {
     const tabId = state.activeTabId;
     if (tabId) {
       await sendToTab(tabId, msg);
