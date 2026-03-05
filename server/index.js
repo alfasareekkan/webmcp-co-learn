@@ -440,6 +440,41 @@ async function buildAnnotatedImage(context, highlights) {
 }
 
 // ---------------------------------------------------------------------------
+// Target app detection — identifies which app the user is asking about
+// ---------------------------------------------------------------------------
+const TARGET_APP_PATTERNS = [
+  { keywords: ["figma"],                          app: "Figma",          urlPattern: "figma.com",                         designUrlPattern: "figma.com/design" },
+  { keywords: ["google sheets", "gsheet", "spreadsheet"], app: "Google Sheets",  urlPattern: "docs.google.com/spreadsheets" },
+  { keywords: ["notion"],                         app: "Notion",         urlPattern: "notion.so" },
+  { keywords: ["miro"],                           app: "Miro",           urlPattern: "miro.com" },
+  { keywords: ["magicpattern", "magic pattern"],  app: "MagicPattern",   urlPattern: "magicpattern.design" },
+  { keywords: ["google docs", "gdocs"],           app: "Google Docs",    urlPattern: "docs.google.com/document" },
+  { keywords: ["canva"],                          app: "Canva",          urlPattern: "canva.com" },
+  { keywords: ["slides", "google slides"],        app: "Google Slides",  urlPattern: "docs.google.com/presentation" },
+];
+
+/**
+ * Detect which app the user's question is about.
+ * Returns { app, urlPattern, designUrlPattern } or null if no match.
+ */
+function detectTargetAppFromQuestion(question) {
+  const q = question.toLowerCase();
+  for (const entry of TARGET_APP_PATTERNS) {
+    for (const kw of entry.keywords) {
+      if (q.includes(kw)) return entry;
+    }
+  }
+  return null;
+}
+
+/**
+ * Check if a URL matches a target app pattern.
+ */
+function urlMatchesPattern(url, pattern) {
+  return url && pattern && url.includes(pattern);
+}
+
+// ---------------------------------------------------------------------------
 // Multi-step guidance — Gemini prompt and response parser
 // ---------------------------------------------------------------------------
 const GUIDANCE_MULTI_STEP_PROMPT = `You are a step-by-step UI guidance expert helping a user complete a task inside a web application.
@@ -448,17 +483,18 @@ User question: {{userQuestion}}
 Current page URL: {{pageUrl}}
 DOM elements with indices and bounding boxes: {{domElements}}
 {{appHints}}
-Analyze the screenshot and DOM, then break this task into 2-5 clear sequential steps. For each step specify:
-- A short action instruction (max 10 words)
-- Which element index to highlight (skip if the app renders via canvas/WebGL)
-- What signals indicate the user completed this step (provide 1-2 signals)
 
-IMPORTANT: Always include "targetApp" (human-readable app name like "Figma", "Google Sheets", "Notion") and "targetUrlPattern" (a URL substring that identifies the correct app, e.g. "figma.com", "docs.google.com/spreadsheets"). If the task is about a specific app, set these fields accordingly — even if the user is currently on a different page.
+CRITICAL RULES:
+1. Generate steps ONLY for actions INSIDE the target application. The user is already on the correct page.
+2. NEVER generate steps to search Google, navigate to a website, or open a browser. The system handles navigation separately.
+3. Analyze the screenshot and DOM of the CURRENT page to create 2-5 clear sequential steps.
+4. For each step specify:
+   - A short action instruction (max 10 words)
+   - Which element index to highlight (skip if the app renders via canvas/WebGL)
+   - What signals indicate the user completed this step (provide 1-2 signals)
 
 Return ONLY valid JSON, no markdown, no explanation outside JSON:
 {
-  "targetApp": "Name of the app this guidance is for",
-  "targetUrlPattern": "url-substring-to-match",
   "taskSummary": "brief description of the full task",
   "steps": [
     {
@@ -513,14 +549,25 @@ APP CONTEXT — Google Sheets:
 - Do NOT highlight individual grid cells by elementIndex — they are canvas-rendered.
 - For cell value changes, use "user_clicked_target" on the formula bar or a toolbar button.`;
   }
-  if (url.includes("figma.com")) {
+  if (url.includes("figma.com/design") || url.includes("figma.com/file")) {
     return `
-APP CONTEXT — Figma:
+APP CONTEXT — Figma (Design Editor):
 - Figma renders its design canvas via WebGL/WASM; layers and objects are NOT DOM elements.
 - Toolbar buttons, left/right property panels, and top menus ARE in the DOM.
 - Prefer "dom_appeared" for panel/dialog openings, "user_clicked_target" for toolbar buttons.
 - Use "url_changed" when navigating between pages or opening a different file.
-- Do NOT highlight canvas-rendered design objects by elementIndex.`;
+- Do NOT highlight canvas-rendered design objects by elementIndex.
+- The user is inside a design file — generate steps for the actual task (e.g., using the Frame tool, selecting layers, etc.).`;
+  }
+  if (url.includes("figma.com")) {
+    return `
+APP CONTEXT — Figma (Homepage / Dashboard):
+- The user is on Figma's homepage or dashboard, NOT inside a design file.
+- They need to either create a new design or open an existing one before they can do design tasks.
+- If the user's question requires editing a design (e.g., create a frame, add shapes, etc.),
+  guide them to: 1) Click "New design file" or "+ Design file" button, OR 2) Open an existing file from their recent files.
+- Use "url_changed" as the primary signal — when the URL changes to figma.com/design/... or figma.com/file/... the user is in the editor.
+- Do NOT generate steps for design tools (Frame, Rectangle, etc.) on this page — they don't exist here.`;
   }
   if (url.includes("magicpattern.design")) {
     return `
@@ -1442,12 +1489,20 @@ function startScreenMonitor(threadId) {
     } catch { return; } // silent — try again next interval
 
     const currentUrl = freshContext?.url || "";
-    if (currentUrl.includes(targetPattern)) {
-      console.log(`[SCREEN] Correct screen detected — "${currentUrl}" matches "${targetPattern}"`);
-      stopScreenMonitor(threadId);
 
-      // Update session back to active
-      sessionManager.setActive(threadId);
+    // Detect the target app info for sub-page checking
+    const originalQuestion = currentSession._originalQuestion || currentSession.originalQuestion;
+    const targetAppInfo = detectTargetAppFromQuestion(originalQuestion);
+    const baseUrlPattern = targetAppInfo?.urlPattern || "";
+
+    // Match if: user is on the exact target pattern OR on the app's base URL (for intermediate/homepage detection)
+    const matchesTarget = currentUrl.includes(targetPattern);
+    const matchesBase = baseUrlPattern && currentUrl.includes(baseUrlPattern);
+
+    if (matchesTarget || matchesBase) {
+      const isOnHomepage = matchesBase && !matchesTarget;
+      console.log(`[SCREEN] App detected — "${currentUrl}" (${isOnHomepage ? "homepage" : "target page"})`);
+      stopScreenMonitor(threadId);
 
       // Update context cache
       if (freshContext) {
@@ -1458,21 +1513,46 @@ function startScreenMonitor(threadId) {
         }
       }
 
-      // Notify all clients
+      // Notify all clients — clear the wrong-screen banner
       const correctScreenData = { type: "CORRECT_SCREEN_DETECTED", targetApp: currentSession.targetApp };
       broadcast("dashboard", correctScreenData);
       sendToDesktop(correctScreenData);
       sendToExtension(correctScreenData);
 
-      broadcast("dashboard", {
-        type: "CHAT_MESSAGE",
-        text: `✅ ${currentSession.targetApp || "Correct application"} detected! Starting guidance now…`,
-        sender: "system",
-        timestamp: Date.now(),
-      });
+      if (isOnHomepage) {
+        // User is on the app's homepage but needs a design/editing page
+        // Generate navigation steps for the homepage (e.g., "Create a new design" or "Open existing file")
+        broadcast("dashboard", {
+          type: "CHAT_MESSAGE",
+          text: `✅ ${currentSession.targetApp || "App"} detected! You're on the homepage — I'll guide you to open a design file first.`,
+          sender: "system",
+          timestamp: Date.now(),
+        });
+      } else {
+        broadcast("dashboard", {
+          type: "CHAT_MESSAGE",
+          text: `✅ ${currentSession.targetApp || "Correct application"} detected! Analyzing the page and preparing guidance…`,
+          sender: "system",
+          timestamp: Date.now(),
+        });
+      }
 
-      // Now show the current step
-      await showCurrentStep(threadId);
+      broadcast("dashboard", { type: "AI_THINKING", thinking: true });
+
+      // ── Deferred plan: the session has no steps yet — generate the plan NOW with fresh context ──
+      if (currentSession._deferred || !currentSession.steps?.length) {
+        console.log(`[SCREEN] Generating deferred plan for: "${originalQuestion}"`);
+        sessionManager.setActive(threadId);
+
+        // Generate the plan — the AI prompt + app hints will handle homepage vs design page context
+        await generateAndStartPlan(originalQuestion, freshContext, { aborted: false }, threadId);
+      } else {
+        // Plan already exists (from showCurrentStep redirect) — just resume
+        sessionManager.setActive(threadId);
+        await showCurrentStep(threadId);
+      }
+
+      broadcast("dashboard", { type: "AI_THINKING", thinking: false });
     }
   }, MONITOR_INTERVAL_MS);
 
@@ -1748,45 +1828,69 @@ async function handleGuidanceChat(text, prefetchedContext = null, signal = null,
 
     if (signal?.aborted) return;
 
-    const plan = await askAIMultiStepPlan(text, context);
-    if (signal?.aborted) return;
+    // ── Pre-plan screen validation ──
+    // Detect which app the user is asking about BEFORE generating any plan.
+    // If user is on the wrong site, don't generate a plan yet — wait for correct screen.
+    const currentUrl = context?.url || "";
+    const targetAppInfo = detectTargetAppFromQuestion(text);
 
-    if (!plan.steps || plan.steps.length === 0) {
+    if (targetAppInfo && !urlMatchesPattern(currentUrl, targetAppInfo.urlPattern)) {
+      // User is asking about an app they haven't opened yet
+      console.log(`[GUIDANCE] Wrong screen — user asked about "${targetAppInfo.app}" but is on "${currentUrl}"`);
+
+      // Determine the right sub-page (e.g., Figma design page vs homepage)
+      const needsDesignPage = targetAppInfo.designUrlPattern ? true : false;
+      const primaryPattern = targetAppInfo.designUrlPattern || targetAppInfo.urlPattern;
+
+      // Create a deferred session — no plan yet, just the target info
+      const deferredPlan = {
+        targetApp: targetAppInfo.app,
+        targetUrlPattern: primaryPattern,
+        taskSummary: `Waiting for you to open ${targetAppInfo.app}…`,
+        steps: [],
+        suggestedFollowUps: [],
+        _deferred: true,
+        _originalQuestion: text,
+      };
+      sessionManager.createSession(threadId, text, deferredPlan);
+      sessionManager.setWaitingForCorrectScreen(threadId);
+      addMessageToConversation(threadId, "user", text);
+
+      // Build a helpful navigation message
+      let navMessage = `Please open **${targetAppInfo.app}** first.`;
+      if (targetAppInfo.designUrlPattern) {
+        navMessage += `\n\nYou need to be on a ${targetAppInfo.app} design/editing page (not just the homepage). If you don't have a file open, create a new design or open an existing one.`;
+      }
+      navMessage += `\n\nI'll automatically detect when you're there and start guiding you step by step.`;
+
       broadcast("dashboard", {
-        type: "CHAT_MESSAGE", text: plan.taskSummary || "No steps generated.",
-        sender: "ai", timestamp: Date.now(),
+        type: "CHAT_MESSAGE",
+        text: navMessage,
+        sender: "ai",
+        timestamp: Date.now(),
       });
+
+      const wrongScreenData = {
+        type: "WRONG_SCREEN",
+        targetApp: targetAppInfo.app,
+        targetUrlPattern: primaryPattern,
+        currentUrl,
+        message: `Navigate to ${targetAppInfo.app} to start guidance`,
+      };
+      broadcast("dashboard", wrongScreenData);
+      sendToDesktop(wrongScreenData);
+      sendToExtension(wrongScreenData);
+
+      // Start monitoring — when user arrives at the app, generate the plan with fresh context
+      startScreenMonitor(threadId);
+
+      broadcast("dashboard", { type: "AI_THINKING", thinking: false });
       return;
     }
 
-    // Store guidance plan in conversation history so future messages have context
-    const planSummary = `[Guidance started] ${plan.taskSummary}\nSteps: ${plan.steps.map((s, i) => `${i+1}. ${s.instruction}`).join("; ")}`;
-    addMessageToConversation(threadId, "ai", planSummary);
+    // ── User is on the correct app (or no specific target detected) — generate plan now ──
+    await generateAndStartPlan(text, context, signal, threadId);
 
-    // ── Send all steps as a readable chat message BEFORE starting guidance ──
-    const stepsText = plan.steps.map((s, i) => `${i + 1}. ${s.instruction}`).join("\n");
-    broadcast("dashboard", {
-      type: "CHAT_MESSAGE",
-      text: `**${plan.taskSummary}**\n\nHere's what we'll do:\n\n${stepsText}\n\n▶ Starting guidance — follow the highlights on the page.`,
-      sender: "ai",
-      timestamp: Date.now(),
-    });
-
-    sessionManager.createSession(threadId, text, plan);
-    sessionContextMap.set(threadId, context);
-
-    broadcast("dashboard", {
-      type: "GUIDANCE_SESSION_START",
-      taskSummary: plan.taskSummary,
-      totalSteps: plan.steps.length,
-      steps: plan.steps.map((s, i) => ({
-        stepNumber: s.stepNumber || i + 1,
-        instruction: s.instruction,
-        status: i === 0 ? "active" : "pending",
-      })),
-    });
-
-    await showCurrentStep(threadId);
   } catch (err) {
     console.error("[Guidance] Error:", err);
     broadcast("dashboard", {
@@ -1796,6 +1900,59 @@ async function handleGuidanceChat(text, prefetchedContext = null, signal = null,
   } finally {
     broadcast("dashboard", { type: "AI_THINKING", thinking: false });
   }
+}
+
+/**
+ * Generate a multi-step plan from AI and start the guidance session.
+ * Called either immediately (if user is on correct page) or deferred (after screen monitor detects correct page).
+ */
+async function generateAndStartPlan(text, context, signal, threadId) {
+  const plan = await askAIMultiStepPlan(text, context);
+  if (signal?.aborted) return;
+
+  if (!plan.steps || plan.steps.length === 0) {
+    broadcast("dashboard", {
+      type: "CHAT_MESSAGE", text: plan.taskSummary || "No steps generated.",
+      sender: "ai", timestamp: Date.now(),
+    });
+    return;
+  }
+
+  // Preserve targetApp/targetUrlPattern from deferred session if it exists
+  const existingSession = sessionManager.getSession(threadId);
+  if (existingSession?.targetApp && !plan.targetApp) {
+    plan.targetApp = existingSession.targetApp;
+    plan.targetUrlPattern = existingSession.targetUrlPattern;
+  }
+
+  // Store guidance plan in conversation history so future messages have context
+  const planSummary = `[Guidance started] ${plan.taskSummary}\nSteps: ${plan.steps.map((s, i) => `${i+1}. ${s.instruction}`).join("; ")}`;
+  addMessageToConversation(threadId, "ai", planSummary);
+
+  // ── Send all steps as a readable chat message BEFORE starting guidance ──
+  const stepsText = plan.steps.map((s, i) => `${i + 1}. ${s.instruction}`).join("\n");
+  broadcast("dashboard", {
+    type: "CHAT_MESSAGE",
+    text: `**${plan.taskSummary}**\n\nHere's what we'll do:\n\n${stepsText}\n\n▶ Starting guidance — follow the highlights on the page.`,
+    sender: "ai",
+    timestamp: Date.now(),
+  });
+
+  sessionManager.createSession(threadId, text, plan);
+  sessionContextMap.set(threadId, context);
+
+  broadcast("dashboard", {
+    type: "GUIDANCE_SESSION_START",
+    taskSummary: plan.taskSummary,
+    totalSteps: plan.steps.length,
+    steps: plan.steps.map((s, i) => ({
+      stepNumber: s.stepNumber || i + 1,
+      instruction: s.instruction,
+      status: i === 0 ? "active" : "pending",
+    })),
+  });
+
+  await showCurrentStep(threadId);
 }
 
 // ---------------------------------------------------------------------------

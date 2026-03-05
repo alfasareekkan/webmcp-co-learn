@@ -38,6 +38,9 @@ export function createSession(threadId, question, fullPlan) {
   const sessionId = generateSessionId();
   const now = new Date().toISOString();
 
+  // A deferred session has no steps yet — it's waiting for the user to navigate to the correct app
+  const isDeferred = Boolean(fullPlan._deferred);
+
   const session = {
     sessionId,
     threadId,
@@ -48,8 +51,10 @@ export function createSession(threadId, question, fullPlan) {
     steps,
     currentStepIndex: 0,
     completedSteps: [],
-    status: steps.length > 0 ? STATUS.ACTIVE : STATUS.COMPLETE,
+    status: isDeferred ? STATUS.WAITING_FOR_CORRECT_SCREEN : (steps.length > 0 ? STATUS.ACTIVE : STATUS.COMPLETE),
     lastSuggestions: suggestedFollowUps,
+    _deferred: isDeferred,
+    _originalQuestion: fullPlan._originalQuestion || question,
     createdAt: now,
     lastUpdatedAt: now,
   };

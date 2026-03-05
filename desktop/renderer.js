@@ -510,17 +510,6 @@ function renderChat() {
     </div>`;
   }
 
-  // Wrong screen banner
-  if (state.wrongScreen) {
-    html += `<div class="wrong-screen-banner">
-      <div class="wrong-screen-icon">⚠️</div>
-      <div class="wrong-screen-text">
-        <strong>Open ${escHtml(state.wrongScreen.targetApp)}</strong><br>
-        <span class="wrong-screen-detail">${escHtml(state.wrongScreen.message)}</span>
-      </div>
-    </div>`;
-  }
-
   for (const msg of msgs) {
     if (msg.isStepProgress) {
       html += `<div class="chat-bubble step-progress">

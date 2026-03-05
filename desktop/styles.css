@@ -826,17 +826,6 @@ body.popup-mode { background: transparent !important; }
   font-weight: 600; color: #FF9800;
 }
 
-/* Wrong screen banner */
-.wrong-screen-banner {
-  display: flex; align-items: center; gap: 12px;
-  padding: 12px 16px; margin: 0 12px 8px;
-  background: rgba(255,152,0,0.08); border: 1px solid rgba(255,152,0,0.25);
-  border-radius: 10px; animation: fadeIn 0.3s ease;
-}
-.wrong-screen-icon { font-size: 24px; flex-shrink: 0; }
-.wrong-screen-text { font-size: 12px; color: var(--text); line-height: 1.5; }
-.wrong-screen-detail { color: var(--text-secondary); font-size: 11px; }
-
 /* ═══════════════════════════════════════════════════════════
    API CONFIG STRIP + DRAWER
    ═══════════════════════════════════════════════════════════ */

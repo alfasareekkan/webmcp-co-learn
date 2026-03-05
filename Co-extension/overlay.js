@@ -210,55 +210,6 @@
         to   { opacity: 1; transform: translateY(0); }
       }
 
-      /* --- Wrong screen banner --- */
-      .__colearn_wrong_screen {
-        position: fixed;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        z-index: 2147483647;
-        pointer-events: none;
-        background: rgba(26, 29, 36, 0.95);
-        backdrop-filter: blur(12px);
-        -webkit-backdrop-filter: blur(12px);
-        border: 1px solid rgba(255,255,255,0.1);
-        border-radius: 16px;
-        padding: 28px 36px;
-        box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-        text-align: center;
-        max-width: 380px;
-        animation: __cl_fadeIn 0.3s ease;
-        font-family: -apple-system, "Inter", "Segoe UI", Roboto, sans-serif;
-      }
-      .__colearn_wrong_screen_icon {
-        font-size: 32px;
-        margin-bottom: 12px;
-      }
-      .__colearn_wrong_screen_title {
-        font-size: 15px;
-        font-weight: 700;
-        color: #e4e8f0;
-        margin-bottom: 8px;
-      }
-      .__colearn_wrong_screen_msg {
-        font-size: 12px;
-        color: #8a8f9c;
-        line-height: 1.5;
-      }
-      .__colearn_wrong_screen_pulse {
-        display: inline-block;
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: #FF9800;
-        margin-right: 6px;
-        animation: __cl_pulse_dot 1.5s ease-in-out infinite;
-      }
-      @keyframes __cl_pulse_dot {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.3; }
-      }
-
       .__colearn_progress_header {
         display: flex;
         align-items: center;
@@ -766,42 +717,18 @@
     }
   });
 
-  // ---- Wrong screen banner ----
-  function showWrongScreenBanner(targetApp, message) {
-    removeWrongScreenBanner();
-    removeOverlay(); // clear any existing highlights
-    const banner = document.createElement("div");
-    banner.className = "__colearn_wrong_screen";
-    banner.innerHTML = `
-      <div class="__colearn_wrong_screen_icon">⚠️</div>
-      <div class="__colearn_wrong_screen_title">Open ${escapeHtml(targetApp)}</div>
-      <div class="__colearn_wrong_screen_msg">
-        <span class="__colearn_wrong_screen_pulse"></span>
-        ${escapeHtml(message || `Please navigate to ${targetApp} to continue guidance.`)}
-      </div>
-    `;
-    document.body.appendChild(banner);
-  }
-
-  function removeWrongScreenBanner() {
-    document.querySelectorAll(".__colearn_wrong_screen").forEach((el) => el.remove());
-  }
-
   // ---- Message listener from background script ----
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg.type === "WRONG_SCREEN") {
-      showWrongScreenBanner(msg.targetApp || "the correct application", msg.message);
+      removeOverlay(); // clear any existing highlights/pill — no popup shown
       sendResponse({ ok: true });
     } else if (msg.type === "CORRECT_SCREEN_DETECTED") {
-      removeWrongScreenBanner();
       sendResponse({ ok: true });
     } else if (msg.type === "SHOW_GUIDANCE") {
-      removeWrongScreenBanner(); // clear banner when real guidance starts
       showAllGuides(msg.guides || []);
       sendResponse({ ok: true });
     } else if (msg.type === "CLEAR_GUIDANCE") {
       removeOverlay();
-      removeWrongScreenBanner();
       sendResponse({ ok: true });
     } else if (msg.type === "STEP_GUIDANCE") {
       if (msg.stepNumber != null) currentStepInfo.stepNumber = msg.stepNumber;
@@ -826,15 +753,13 @@
     const msg = e.detail;
     if (!msg) return;
     if (msg.type === "WRONG_SCREEN") {
-      showWrongScreenBanner(msg.targetApp || "the correct application", msg.message);
+      removeOverlay(); // clear any existing highlights/pill — no popup shown
     } else if (msg.type === "CORRECT_SCREEN_DETECTED") {
-      removeWrongScreenBanner();
+      // no-op — guidance will start via SHOW_GUIDANCE
     } else if (msg.type === "SHOW_GUIDANCE") {
-      removeWrongScreenBanner();
       showAllGuides(msg.guides || []);
     } else if (msg.type === "CLEAR_GUIDANCE") {
       removeOverlay();
-      removeWrongScreenBanner();
     } else if (msg.type === "STEP_GUIDANCE") {
       if (msg.stepNumber != null) currentStepInfo.stepNumber = msg.stepNumber;
       if (msg.totalSteps != null) currentStepInfo.totalSteps = msg.totalSteps;
