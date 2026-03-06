@@ -443,7 +443,8 @@ async function buildAnnotatedImage(context, highlights) {
 // Target app detection — identifies which app the user is asking about
 // ---------------------------------------------------------------------------
 const TARGET_APP_PATTERNS = [
-  { keywords: ["figma"],                          app: "Figma",          urlPattern: "figma.com",                         designUrlPattern: "figma.com/design" },
+  // Figma editor URLs can be either /design/... (new) or /file/... (legacy / some workspaces)
+  { keywords: ["figma"],                          app: "Figma",          urlPattern: "figma.com",                         designUrlPattern: "figma.com/design|figma.com/file" },
   { keywords: ["google sheets", "gsheet", "spreadsheet"], app: "Google Sheets",  urlPattern: "docs.google.com/spreadsheets" },
   { keywords: ["notion"],                         app: "Notion",         urlPattern: "notion.so" },
   { keywords: ["miro"],                           app: "Miro",           urlPattern: "miro.com" },
@@ -471,7 +472,13 @@ function detectTargetAppFromQuestion(question) {
  * Check if a URL matches a target app pattern.
  */
 function urlMatchesPattern(url, pattern) {
-  return url && pattern && url.includes(pattern);
+  if (!url || !pattern) return false;
+  const parts = String(pattern)
+    .split("|")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (!parts.length) return false;
+  return parts.some((p) => url.includes(p));
 }
 
 // ---------------------------------------------------------------------------
@@ -549,7 +556,7 @@ APP CONTEXT — Google Sheets:
 - Do NOT highlight individual grid cells by elementIndex — they are canvas-rendered.
 - For cell value changes, use "user_clicked_target" on the formula bar or a toolbar button.`;
   }
-  if (url.includes("figma.com/design") || url.includes("figma.com/file")) {
+  if (urlMatchesPattern(url, "figma.com/design|figma.com/file")) {
     return `
 APP CONTEXT — Figma (Design Editor):
 - Figma renders its design canvas via WebGL/WASM; layers and objects are NOT DOM elements.
@@ -1225,7 +1232,7 @@ async function showCurrentStep(threadId) {
   // ── Screen validation: check if user is on the correct app ──
   const currentUrl = context?.url || "";
   const targetPattern = session.targetUrlPattern;
-  if (targetPattern && currentUrl && !currentUrl.includes(targetPattern)) {
+  if (targetPattern && currentUrl && !urlMatchesPattern(currentUrl, targetPattern)) {
     console.log(`[STEP] Wrong screen detected — expected "${targetPattern}", got "${currentUrl}"`);
     sessionManager.setWaitingForCorrectScreen(threadId);
 
@@ -1496,7 +1503,7 @@ function startScreenMonitor(threadId) {
     const baseUrlPattern = targetAppInfo?.urlPattern || "";
 
     // Match if: user is on the exact target pattern OR on the app's base URL (for intermediate/homepage detection)
-    const matchesTarget = currentUrl.includes(targetPattern);
+    const matchesTarget = urlMatchesPattern(currentUrl, targetPattern);
     const matchesBase = baseUrlPattern && currentUrl.includes(baseUrlPattern);
 
     if (matchesTarget || matchesBase) {
@@ -1922,7 +1929,20 @@ async function generateAndStartPlan(text, context, signal, threadId) {
   const existingSession = sessionManager.getSession(threadId);
   if (existingSession?.targetApp && !plan.targetApp) {
     plan.targetApp = existingSession.targetApp;
-    plan.targetUrlPattern = existingSession.targetUrlPattern;
+  }
+  if (existingSession?.targetUrlPattern && !plan.targetUrlPattern) {
+    const desired = existingSession.targetUrlPattern;
+    const currentUrl = context?.url || "";
+
+    // If we're already on the strict target page, keep it.
+    // Otherwise, fall back to the app's base URL so homepage guidance can run without
+    // immediately tripping the "wrong screen" guard.
+    if (currentUrl && urlMatchesPattern(currentUrl, desired)) {
+      plan.targetUrlPattern = desired;
+    } else {
+      const targetInfo = detectTargetAppFromQuestion(existingSession._originalQuestion || existingSession.originalQuestion || text);
+      plan.targetUrlPattern = targetInfo?.urlPattern || null;
+    }
   }
 
   // Store guidance plan in conversation history so future messages have context
